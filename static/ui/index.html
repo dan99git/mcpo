@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <title>mcpo UI</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <style>
+    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
+    body { margin: 0; padding: 1.5rem; max-width: 960px; }
+    header { margin-bottom: 1.5rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 .25rem; }
+    code, pre { background: #0002; padding: .15rem .35rem; border-radius: 4px; }
+    .servers, .tools { display: grid; gap: .5rem; }
+    .card { border: 1px solid #8884; border-radius: 6px; padding: .75rem .9rem; }
+    .badge { display: inline-block; padding: 0 .5rem; font-size: .65rem; text-transform: uppercase; letter-spacing:.05em; border:1px solid currentColor; border-radius: 12px; }
+    .connected { color: #0a8438; }
+    .disconnected { color: #b9472d; }
+    a { color: #2a62d6; text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .muted { opacity: .66; }
+    footer { margin-top: 2rem; font-size: .75rem; opacity: .7; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>mcpo UI</h1>
+    <p class="muted">Minimal embedded interface. Browse servers & tools exposed through the MCP OpenAPI proxy.</p>
+  </header>
+  <section id="servers-section">
+    <h2>Servers</h2>
+    <div class="servers" id="servers"></div>
+  </section>
+  <section id="tools-section" style="display:none">
+    <h2 id="tools-title">Tools</h2>
+    <div><button id="back">← Back</button></div>
+    <div class="tools" id="tools"></div>
+  </section>
+  <script>
+    async function fetchJson(url) {
+      const r = await fetch(url);
+      if(!r.ok) throw new Error(`${r.status}`);
+      return await r.json();
+    }
+    const serversEl = document.getElementById('servers');
+    const toolsSection = document.getElementById('tools-section');
+    const serversSection = document.getElementById('servers-section');
+    const toolsEl = document.getElementById('tools');
+    const toolsTitle = document.getElementById('tools-title');
+    document.getElementById('back').onclick = () => { toolsSection.style.display='none'; serversSection.style.display='block'; };
+
+    function serverCard(s) {
+      const div = document.createElement('div');
+      div.className='card';
+      div.innerHTML = `<strong>${s.name}</strong> <span class="badge ${s.connected? 'connected':'disconnected'}">${s.connected? 'up':'down'}</span><br>`+
+        `<small class="muted">type: ${s.type}</small><br>`+
+        `<a data-server="${s.name}" href="#">View tools</a> · <a target="_blank" href="${s.basePath}docs">Docs</a>`;
+      return div;
+    }
+
+    function toolCard(server, t) {
+      const div = document.createElement('div');
+      div.className='card';
+      const url = `/${server}/${t}`;
+      div.innerHTML = `<strong>${t}</strong><br>`+
+        `<a target="_blank" href="/${server}/docs#/${t.replaceAll('_','%20')}">Docs</a> · `+
+        `<a target="_blank" href="${url}">Raw Endpoint</a>`;
+      return div;
+    }
+
+    async function loadServers(){
+      serversEl.textContent='Loading…';
+      try {
+        const data = await fetchJson('/_meta/servers');
+        serversEl.textContent='';
+        data.servers.forEach(s => serversEl.appendChild(serverCard(s)));
+        serversEl.querySelectorAll('a[data-server]').forEach(a=>{
+          a.onclick = async (e)=>{
+            e.preventDefault();
+            await loadTools(a.dataset.server);
+          };
+        });
+      } catch(e){ serversEl.textContent='Failed to load servers'; }
+    }
+
+    async function loadTools(server){
+      toolsEl.textContent='Loading…';
+      serversSection.style.display='none';
+      toolsSection.style.display='block';
+      toolsTitle.textContent = `Tools: ${server}`;
+      try {
+        const data = await fetchJson(`/_meta/servers/${server}/tools`);
+        toolsEl.textContent='';
+        data.tools.forEach(t => toolsEl.appendChild(toolCard(server, t)));
+      } catch(e){ toolsEl.textContent='Failed to load tools'; }
+    }
+
+    loadServers();
+    setInterval(loadServers, 5000); // light refresh
+  </script>
+  <footer>mcpo minimal UI • <a href="https://github.com/open-webui/mcpo" target="_blank">GitHub</a></footer>
+</body>
+</html>

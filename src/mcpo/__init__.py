@@ -72,6 +72,12 @@ def main(
     tool_timeout: Annotated[
         Optional[int], typer.Option("--tool-timeout", help="Per tool invocation timeout in seconds")
     ] = 30,
+    tool_timeout_max: Annotated[
+        Optional[int], typer.Option("--tool-timeout-max", help="Hard upper bound for any effective tool timeout (seconds)")
+    ] = 600,
+    structured_output: Annotated[
+        Optional[bool], typer.Option("--structured-output", help="Return unified structured response object instead of raw list flattening")
+    ] = False,
 ):
     server_command = None
     if not config_path:
@@ -145,6 +151,8 @@ def main(
             headers=headers,
             hot_reload=hot_reload,
             tool_timeout=tool_timeout,
+            tool_timeout_max=tool_timeout_max,
+            structured_output=structured_output,
         )
     )
 

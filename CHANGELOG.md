@@ -1,28 +1,37 @@
 # Changelog
 
 ## Unreleased (feat/phase1-baseline)
+### Added
+- `/healthz` endpoint and health snapshot
+- Pydantic config models (`AppConfig`, `ServerConfig`)
+- Global reload lock for atomic config reloads
+- `--tool-timeout` CLI option (default 30s)
+- `--structured-output` flag (experimental) adding typed collection envelope
+- Enum and min/max length/number constraint exposure in dynamic models
+- MCP protocol version header injection (`MCP-Protocol-Version: 2025-06-18`)
+- Unified success + error envelope helpers and global HTTP/validation handlers
+- Tool-level unified error envelope (consistent `{ok:false,error:{...}}` shape)
+- Tests for structured output and tool error envelope
+- Enforced per-invocation tool timeout with async cancellation (`asyncio.wait_for`)
+- Per-request timeout override via `X-Tool-Timeout` header or `?timeout=` query param
+- Hard upper bound `--tool-timeout-max` with validation and error envelope
+- Meta endpoints: `/_meta/servers`, `/_meta/servers/{server}/tools`, `/_meta/config`
+- Dynamic config reload endpoint `/_meta/reload` and per-server reinit `/_meta/reinit/{server}`
+- Server & tool enable/disable endpoints (403 enforcement for disabled tools)
+- In-browser settings UI at `/mcp` with theme toggle, >40 tool warning, expandable server panels
+- Add / remove server endpoints (config mode persistence) and modal (Git analysis stub + manual path)
+- Open config action (vscode:// deep link) from UI
+
+### Changed
 - Correct README Python version to 3.11+
-- Add pydantic config models (`AppConfig`, `ServerConfig`)
-- Add `/healthz` endpoint and health snapshot
-- Add global reload lock for atomic config reloads
-- Add basic enum/min/max length/number constraints exposure in dynamic models
-- Add `--tool-timeout` CLI option (default 30s) stored in app state
 - Cleanup duplicate imports
 
+### Planned / Pending
+- Expanded structured output (streaming, richer resource metadata)
+- Additional tests for image/resource items & timeout behavior
+
 ---
-Historical entries are maintained upstream; this fork will annotate divergence points here.# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
-# Changelog
-
-All notable changes to this project will be documented in this file.
-
-The format is based on Keep a Changelog,
-and this project adheres to Semantic Versioning.
+Historical entries are maintained upstream; this fork annotates divergence points below.
 
 ## [0.0.17] - 2025-07-22
 

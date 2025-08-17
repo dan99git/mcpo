@@ -1,0 +1,5 @@
+{
+  "name": "MCP Server Settings",
+  "description": "A replica of the Cursor MCP server settings page, built with React and Tailwind CSS, featuring an OpenWebUI theme with light and dark modes.",
+  "requestFramePermissions": []
+}

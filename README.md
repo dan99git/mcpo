@@ -144,9 +144,86 @@ The server exposes `GET /healthz` providing a JSON snapshot:
 
 ### Tool Timeout
 
-Use `--tool-timeout <seconds>` (default 30) to bound individual tool calls; exceeded calls return HTTP 504.
+Use `--tool-timeout <seconds>` (default 30) to bound individual tool calls. Exceeded calls return HTTP 504 with a unified envelope:
 
-## 🔧 Requirements
+```json
+{ "ok": false, "error": { "message": "Tool timed out", "code": "timeout", "data": { "timeoutSeconds": 30 } } }
+```
+
+You can override per request:
+
+- HTTP Header: `X-Tool-Timeout: 120`
+- Query parameter: `?timeout=120`
+
+Hard upper bound: configure `--tool-timeout-max` (default 600). Overrides beyond this are rejected with HTTP 400 (`code: invalid_timeout`). Invalid or non-positive values are also rejected. Structured output mode still includes an empty `output` collection for errors.
+
+### Structured Output (Experimental)
+
+Enable `--structured-output` to wrap each tool response in a normalized envelope:
+
+```json
+{
+  "ok": true,
+  "result": { /* original value (compat) */ },
+  "output": {
+    "type": "collection",
+    "items": [
+      { "type": "text|scalar|list|object|null", "value": ... }
+    ]
+  }
+}
+```
+
+This early experimental format will evolve to support multiple mixed content items (text, images, resources) aligned with upcoming MCP spec extensions. Omit the flag to preserve the original simpler `{ ok, result }` shape.
+
+## � MCP Server Settings UI (`/mcp`)
+
+When the optional React settings app is present, it mounts at `/mcp` (fallback minimal list UI also available at `/ui`). It exposes live server + tool management.
+
+### Meta / Control Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/_meta/servers` | GET | List servers (name, type, connected, enabled, basePath) |
+| `/_meta/servers/{server}/tools` | GET | Tools for a server (name, enabled) |
+| `/_meta/servers` | POST | Add server (config mode only) `{name, command?, url?, type?, env?}` |
+| `/_meta/servers/{server}` | DELETE | Remove server (config mode only) |
+| `/_meta/servers/{server}/enable` | POST | Enable server |
+| `/_meta/servers/{server}/disable` | POST | Disable server |
+| `/_meta/servers/{s}/tools/{t}/enable` | POST | Enable tool |
+| `/_meta/servers/{s}/tools/{t}/disable` | POST | Disable tool |
+| `/_meta/reload` | POST | Diff & reload config (add/remove/update servers) |
+| `/_meta/reinit/{server}` | POST | Reinitialize single server session (fresh MCP handshake) |
+| `/_meta/config` | GET | Return config path (if config mode) |
+
+Disabled items return HTTP 403:
+
+```json
+{ "ok": false, "error": { "message": "Tool disabled", "code": "disabled" } }
+```
+
+### Functional Brief (Summary)
+- Light/dark theme toggle (Sun/Moon) persists per session.
+- Global warning when total enabled tools across enabled servers > 40.
+- Server panel: enable/disable switch, expandable tool list, live status (disabled / no tools / X tools enabled).
+- Tool tags: individual enable/disable state.
+- Add server modal: Git analysis path & manual setup path; environment variable rows with add/remove.
+- Per-server restart (reinit) and global reload.
+
+### Full Functional Brief
+
+Functional Brief: MCP Server Settings UI
+1. Main View: Server List – lists all configured servers; theme switch; dynamic >40 tools warning.
+2. Server Item – master toggle; semi-transparent when disabled; expandable if tools exist; rotating chevron; status label (Disabled / No tools or prompts / X tools enabled). Tool tags toggle individual enabled state with distinct styling.
+3. Add New Server – "New MCP Server" button opens modal with two tabs:
+  - Install from Git: analyze repo → show Name, Start Command, Dependencies, required secret inputs → Install Server.
+  - Manual Setup: enter Name (auto initial), Start Command, Dependencies, dynamic ENV variable rows (+ Add Variable / remove) → Add Server (disabled until Name present).
+  - Modal closable via X, Escape, or backdrop.
+
+> Added/removed servers persist only in config mode (writes to the active config JSON then invokes reload).
+
+
+## �🔧 Requirements
 
 - Python 3.11+ (runtime requirement; earlier README line corrected for consistency with pyproject)
 - uv (optional, but highly recommended for performance + packaging)
