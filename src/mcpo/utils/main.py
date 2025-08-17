@@ -155,6 +155,24 @@ def _process_schema_property(
         # Return a Union of all possible types
         return Union[tuple(type_hints)], pydantic_field
 
+    # Apply basic constraint metadata if present
+    def _augment_field(field_obj: FieldInfo, schema: Dict[str, Any]):
+        # Simple numeric / length constraints and enum exposure for OpenAPI fidelity
+        constraints_map = [
+            ("minimum", "ge"),
+            ("maximum", "le"),
+            ("minLength", "min_length"),
+            ("maxLength", "max_length"),
+        ]
+        for src, tgt in constraints_map:
+            if src in schema:
+                setattr(field_obj, tgt, schema[src])  # type: ignore[attr-defined]
+        if "enum" in schema and isinstance(schema["enum"], list):
+            setattr(field_obj, "enum", schema["enum"])  # type: ignore[attr-defined]
+        return field_obj
+
+    pydantic_field = _augment_field(pydantic_field, prop_schema)
+
     if prop_type == "object":
         nested_properties = prop_schema.get("properties", {})
         nested_required = prop_schema.get("required", [])
@@ -282,7 +300,8 @@ def get_tool_handler(
         def make_endpoint_func(
             endpoint_name: str, FormModel, session: ClientSession
         ):  # Parameterized endpoint
-            async def tool(form_data: FormModel) -> Union[ResponseModel, Any]:
+            # Use broad return type to satisfy static analysis (dynamic model)
+            async def tool(form_data):  # type: ignore[no-untyped-def]
                 args = form_data.model_dump(exclude_none=True, by_alias=True)
                 logger.info(f"Calling endpoint: {endpoint_name}, with args: {args}")
                 try:

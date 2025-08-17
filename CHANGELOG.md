@@ -3,7 +3,11 @@
 ## Unreleased (feat/phase1-baseline)
 - Correct README Python version to 3.11+
 - Add pydantic config models (`AppConfig`, `ServerConfig`)
-- (Planned in subsequent commits) health endpoint, timeout flag, improved error envelope, reload lock, schema constraints.
+- Add `/healthz` endpoint and health snapshot
+- Add global reload lock for atomic config reloads
+- Add basic enum/min/max length/number constraints exposure in dynamic models
+- Prepare groundwork for per-tool timeout & standardized error envelope (pending wiring in CLI)
+- Cleanup duplicate imports
 
 ---
 Historical entries are maintained upstream; this fork will annotate divergence points here.# Changelog
