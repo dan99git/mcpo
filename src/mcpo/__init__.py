@@ -69,6 +69,9 @@ def main(
     hot_reload: Annotated[
         Optional[bool], typer.Option("--hot-reload", help="Enable hot reload for config file changes")
     ] = False,
+    tool_timeout: Annotated[
+        Optional[int], typer.Option("--tool-timeout", help="Per tool invocation timeout in seconds")
+    ] = 30,
 ):
     server_command = None
     if not config_path:
@@ -141,6 +144,7 @@ def main(
             path_prefix=path_prefix,
             headers=headers,
             hot_reload=hot_reload,
+            tool_timeout=tool_timeout,
         )
     )
 

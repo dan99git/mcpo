@@ -475,6 +475,7 @@ async def run(
     api_dependency = get_verify_api_key(api_key) if api_key else None
     connection_timeout = kwargs.get("connection_timeout", None)
     strict_auth = kwargs.get("strict_auth", False)
+    tool_timeout = int(kwargs.get("tool_timeout", 30))
 
     # MCP Server
     server_type = normalize_server_type(kwargs.get("server_type"))
@@ -547,6 +548,9 @@ async def run(
         allow_headers=["*"],
     )
 
+    # Store tool timeout in app state for handler usage
+    main_app.state.tool_timeout = tool_timeout
+
     # Add middleware to protect also documentation and spec
     if api_key and strict_auth:
         main_app.add_middleware(APIKeyMiddleware, api_key=api_key)
@@ -605,6 +609,7 @@ async def run(
         main_app.state.connection_timeout = connection_timeout
         main_app.state.lifespan = lifespan
         main_app.state.path_prefix = path_prefix
+        main_app.state.tool_timeout = tool_timeout
     else:
         logger.error("MCPO server_command or config_path must be provided.")
         raise ValueError("You must provide either server_command or config.")

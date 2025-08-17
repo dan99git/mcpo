@@ -6,7 +6,7 @@
 - Add `/healthz` endpoint and health snapshot
 - Add global reload lock for atomic config reloads
 - Add basic enum/min/max length/number constraints exposure in dynamic models
-- Prepare groundwork for per-tool timeout & standardized error envelope (pending wiring in CLI)
+- Add `--tool-timeout` CLI option (default 30s) stored in app state
 - Cleanup duplicate imports
 
 ---

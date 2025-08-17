@@ -127,6 +127,25 @@ Each tool will be accessible under its own unique route, e.g.:
 
 Each with a dedicated OpenAPI schema and proxy handler. Access full schema UI at: `http://localhost:8000/<tool>/docs`  (e.g. /memory/docs, /time/docs)
 
+### Health Endpoint
+
+The server exposes `GET /healthz` providing a JSON snapshot:
+
+```json
+{
+  "status": "ok",
+  "generation": 1,
+  "lastReload": "2025-08-17T20:15:00Z",
+  "servers": {
+    "time": {"connected": true, "type": "stdio"}
+  }
+}
+```
+
+### Tool Timeout
+
+Use `--tool-timeout <seconds>` (default 30) to bound individual tool calls; exceeded calls return HTTP 504.
+
 ## 🔧 Requirements
 
 - Python 3.11+ (runtime requirement; earlier README line corrected for consistency with pyproject)
