@@ -7,6 +7,7 @@ import socket
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Optional, Dict, Any
 from urllib.parse import urljoin
+from datetime import datetime, timezone
 
 import uvicorn
 from fastapi import Depends, FastAPI
@@ -24,12 +25,47 @@ from mcpo.utils.main import (
     get_tool_handler,
     normalize_server_type,
 )
-from mcpo.utils.main import get_model_fields, get_tool_handler
-from mcpo.utils.auth import get_verify_api_key, APIKeyMiddleware
 from mcpo.utils.config_watcher import ConfigWatcher
 
 
 logger = logging.getLogger(__name__)
+
+# Global reload lock to ensure atomic config reloads
+_reload_lock = asyncio.Lock()
+
+# Global health snapshot
+_health_state: Dict[str, Any] = {
+    "generation": 0,
+    "last_reload": None,
+    "servers": {},  # name -> {connected: bool, type: str}
+}
+
+
+def _update_health_snapshot(app: FastAPI):
+    """Recompute health snapshot based on mounted sub apps."""
+    servers = {}
+    for route in app.router.routes:
+        if isinstance(route, Mount) and isinstance(route.app, FastAPI):
+            sub_app = route.app
+            servers[sub_app.title] = {
+                "connected": bool(getattr(sub_app.state, "is_connected", False)),
+                "type": getattr(sub_app.state, "server_type", "unknown"),
+            }
+    _health_state["servers"] = servers
+
+
+def _register_health_endpoint(app: FastAPI):
+    @app.get("/healthz")
+    async def healthz():  # noqa: D401
+        """Basic health & connectivity info."""
+        # Update on demand to reflect latest connection flags
+        _update_health_snapshot(app)
+        return {
+            "status": "ok",
+            "generation": _health_state["generation"],
+            "lastReload": _health_state["last_reload"],
+            "servers": _health_state["servers"],
+        }
 
 
 class GracefulShutdown:
@@ -182,72 +218,66 @@ def unmount_servers(main_app: FastAPI, path_prefix: str, server_names: list):
 
 async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, Any]):
     """Handle config reload by comparing and updating mounted servers."""
-    old_config_data = getattr(main_app.state, 'config_data', {})
-    backup_routes = list(main_app.router.routes)  # Backup current routes for rollback
+    async with _reload_lock:
+        old_config_data = getattr(main_app.state, 'config_data', {})
+        backup_routes = list(main_app.router.routes)  # Backup current routes for rollback
 
-    try:
-        old_servers = set(old_config_data.get("mcpServers", {}).keys())
-        new_servers = set(new_config_data.get("mcpServers", {}).keys())
+        try:
+            old_servers = set(old_config_data.get("mcpServers", {}).keys())
+            new_servers = set(new_config_data.get("mcpServers", {}).keys())
 
-        # Find servers to add, remove, and potentially update
-        servers_to_add = new_servers - old_servers
-        servers_to_remove = old_servers - new_servers
-        servers_to_check = old_servers & new_servers
+            servers_to_add = new_servers - old_servers
+            servers_to_remove = old_servers - new_servers
+            servers_to_check = old_servers & new_servers
 
-        # Get app configuration from state
-        cors_allow_origins = getattr(main_app.state, 'cors_allow_origins', ["*"])
-        api_key = getattr(main_app.state, 'api_key', None)
-        strict_auth = getattr(main_app.state, 'strict_auth', False)
-        api_dependency = getattr(main_app.state, 'api_dependency', None)
-        connection_timeout = getattr(main_app.state, 'connection_timeout', None)
-        lifespan = getattr(main_app.state, 'lifespan', None)
-        path_prefix = getattr(main_app.state, 'path_prefix', "/")
+            cors_allow_origins = getattr(main_app.state, 'cors_allow_origins', ["*"])
+            api_key = getattr(main_app.state, 'api_key', None)
+            strict_auth = getattr(main_app.state, 'strict_auth', False)
+            api_dependency = getattr(main_app.state, 'api_dependency', None)
+            connection_timeout = getattr(main_app.state, 'connection_timeout', None)
+            lifespan = getattr(main_app.state, 'lifespan', None)
+            path_prefix = getattr(main_app.state, 'path_prefix', "/")
 
-        # Remove servers that are no longer in config
-        if servers_to_remove:
-            logger.info(f"Removing servers: {list(servers_to_remove)}")
-            unmount_servers(main_app, path_prefix, list(servers_to_remove))
+            if servers_to_remove:
+                logger.info(f"Removing servers: {list(servers_to_remove)}")
+                unmount_servers(main_app, path_prefix, list(servers_to_remove))
 
-        # Check for configuration changes in existing servers
-        servers_to_update = []
-        for server_name in servers_to_check:
-            old_cfg = old_config_data["mcpServers"][server_name]
-            new_cfg = new_config_data["mcpServers"][server_name]
-            if old_cfg != new_cfg:
-                servers_to_update.append(server_name)
+            servers_to_update = []
+            for server_name in servers_to_check:
+                old_cfg = old_config_data["mcpServers"][server_name]
+                new_cfg = new_config_data["mcpServers"][server_name]
+                if old_cfg != new_cfg:
+                    servers_to_update.append(server_name)
 
-        # Remove and re-add updated servers
-        if servers_to_update:
-            logger.info(f"Updating servers: {servers_to_update}")
-            unmount_servers(main_app, path_prefix, servers_to_update)
-            servers_to_add.update(servers_to_update)
+            if servers_to_update:
+                logger.info(f"Updating servers: {servers_to_update}")
+                unmount_servers(main_app, path_prefix, servers_to_update)
+                servers_to_add.update(servers_to_update)
 
-        # Add new servers and updated servers
-        if servers_to_add:
-            logger.info(f"Adding servers: {list(servers_to_add)}")
-            for server_name in servers_to_add:
-                server_cfg = new_config_data["mcpServers"][server_name]
-                try:
-                    sub_app = create_sub_app(
-                        server_name, server_cfg, cors_allow_origins, api_key,
-                        strict_auth, api_dependency, connection_timeout, lifespan
-                    )
-                    main_app.mount(f"{path_prefix}{server_name}", sub_app)
-                except Exception as e:
-                    logger.error(f"Failed to create server '{server_name}': {e}")
-                    # Rollback on failure
-                    main_app.router.routes = backup_routes
-                    raise
+            if servers_to_add:
+                logger.info(f"Adding servers: {list(servers_to_add)}")
+                for server_name in servers_to_add:
+                    server_cfg = new_config_data["mcpServers"][server_name]
+                    try:
+                        sub_app = create_sub_app(
+                            server_name, server_cfg, cors_allow_origins, api_key,
+                            strict_auth, api_dependency, connection_timeout, lifespan
+                        )
+                        main_app.mount(f"{path_prefix}{server_name}", sub_app)
+                    except Exception as e:
+                        logger.error(f"Failed to create server '{server_name}': {e}")
+                        main_app.router.routes = backup_routes
+                        raise
 
-        # Update stored config data only after successful reload
-        main_app.state.config_data = new_config_data
-        logger.info("Config reload completed successfully")
-
-    except Exception as e:
-        logger.error(f"Error during config reload, keeping previous configuration: {e}")
-        # Ensure we're back to the original state
-        main_app.router.routes = backup_routes
-        raise
+            main_app.state.config_data = new_config_data
+            _health_state["generation"] += 1
+            _health_state["last_reload"] = datetime.now(timezone.utc).isoformat()
+            _update_health_snapshot(main_app)
+            logger.info("Config reload completed successfully")
+        except Exception as e:
+            logger.error(f"Error during config reload, keeping previous configuration: {e}")
+            main_app.router.routes = backup_routes
+            raise
 
 
 async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
@@ -520,6 +550,9 @@ async def run(
     # Add middleware to protect also documentation and spec
     if api_key and strict_auth:
         main_app.add_middleware(APIKeyMiddleware, api_key=api_key)
+
+    # Register health endpoint early
+    _register_health_endpoint(main_app)
 
     headers = kwargs.get("headers")
     if headers and isinstance(headers, str):
