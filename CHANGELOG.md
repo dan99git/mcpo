@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased (feat/phase1-baseline)
+- Correct README Python version to 3.11+
+- Add pydantic config models (`AppConfig`, `ServerConfig`)
+- (Planned in subsequent commits) health endpoint, timeout flag, improved error envelope, reload lock, schema constraints.
+
+---
+Historical entries are maintained upstream; this fork will annotate divergence points here.# Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
