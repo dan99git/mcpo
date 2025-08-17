@@ -18,4 +18,4 @@ def test_remote_requires_url():
 
 def test_valid_streamable_http():
     cfg = ServerConfig(name="api", type="streamable-http", url="http://localhost:8000")
-    assert cfg.url.endswith(":8000")
+    assert str(cfg.url).rstrip('/') == 'http://localhost:8000'

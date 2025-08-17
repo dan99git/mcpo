@@ -1,8 +1,10 @@
 import json
+import asyncio
 import traceback
 from typing import Any, Dict, ForwardRef, List, Optional, Type, Union
 import logging
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse
 
 from mcp import ClientSession, types
 from mcp.types import (
@@ -36,24 +38,74 @@ def normalize_server_type(server_type: str) -> str:
     return server_type
 
 def process_tool_response(result: CallToolResult) -> list:
-    """Universal response processor for all tool endpoints"""
-    response = []
+    """Universal response processor: returns a list of primitive/structured values.
+
+    For now each MCP content item is flattened into a python value. Upstream classification
+    into structured envelope performed later if flag enabled.
+    """
+    response: list = []
     for content in result.content:
         if isinstance(content, types.TextContent):
-            text = content.text
-            if isinstance(text, str):
+            value = content.text
+            if isinstance(value, str):
                 try:
-                    text = json.loads(text)
+                    value = json.loads(value)
                 except json.JSONDecodeError:
                     pass
-            response.append(text)
+            response.append(value)
         elif isinstance(content, types.ImageContent):
-            image_data = f"data:{content.mimeType};base64,{content.data}"
-            response.append(image_data)
+            # Represent images as data URI string; future: separate type with metadata
+            response.append({"_kind": "image", "mimeType": content.mimeType, "data": content.data})
         elif isinstance(content, types.EmbeddedResource):
-            # TODO: Handle embedded resources
-            response.append("Embedded resource not supported yet.")
+            response.append({"_kind": "resource", "uri": getattr(content, "uri", None)})
+        else:
+            response.append(str(content))
     return response
+
+
+def _classify_item(val: Any) -> Dict[str, Any]:
+    if val is None:
+        return {"type": "null", "value": None}
+    if isinstance(val, dict) and "_kind" in val:
+        kind = val.get("_kind")
+        if kind == "image":
+            return {"type": "image", "mimeType": val.get("mimeType"), "data": val.get("data")}
+        if kind == "resource":
+            return {"type": "resource", "uri": val.get("uri")}
+    if isinstance(val, str):
+        return {"type": "text", "value": val}
+    if isinstance(val, (int, float, bool)):
+        return {"type": "scalar", "value": val}
+    if isinstance(val, list):
+        return {"type": "list", "value": val}
+    if isinstance(val, dict):
+        return {"type": "object", "value": val}
+    return {"type": "string", "value": str(val)}
+
+
+def build_success(result_value: Any, items: list, structured: bool) -> Dict[str, Any]:
+    if not structured:
+        # Maintain legacy shape
+        if len(items) == 1:
+            return {"ok": True, "result": result_value}
+        return {"ok": True, "result": result_value}
+    classified = [_classify_item(v) for v in items]
+    return {
+        "ok": True,
+        "result": result_value,
+        "output": {"type": "collection", "items": classified},
+    }
+
+
+def build_error(message: str, status: int, code: Optional[str] = None, data: Any = None, structured: bool = False) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"ok": False, "error": {"message": message}}
+    if code:
+        payload["error"]["code"] = code
+    if data is not None:
+        payload["error"]["data"] = data
+    if structured:
+        payload["output"] = {"type": "collection", "items": []}
+    return payload
 
 
 def name_needs_alias(name: str) -> bool:
@@ -167,8 +219,11 @@ def _process_schema_property(
         for src, tgt in constraints_map:
             if src in schema:
                 setattr(field_obj, tgt, schema[src])  # type: ignore[attr-defined]
+        # Expose enum via json_schema_extra for downstream schema generation
         if "enum" in schema and isinstance(schema["enum"], list):
-            setattr(field_obj, "enum", schema["enum"])  # type: ignore[attr-defined]
+            extra = getattr(field_obj, 'json_schema_extra', None) or {}
+            extra['enum'] = schema['enum']
+            setattr(field_obj, 'json_schema_extra', extra)
         return field_obj
 
     pydantic_field = _augment_field(pydantic_field, prop_schema)
@@ -301,52 +356,75 @@ def get_tool_handler(
             endpoint_name: str, FormModel, session: ClientSession
         ):  # Parameterized endpoint
             # Use broad return type to satisfy static analysis (dynamic model)
-            async def tool(form_data):  # type: ignore[no-untyped-def]
+            async def tool(form_data, request: Request):  # type: ignore[no-untyped-def]
                 args = form_data.model_dump(exclude_none=True, by_alias=True)
                 logger.info(f"Calling endpoint: {endpoint_name}, with args: {args}")
+                structured = getattr(request.app.state, "structured_output", False)
                 try:
-                    result = await session.call_tool(endpoint_name, arguments=args)
+                    # Enforced enable/disable state
+                    server_name = request.app.title
+                    global_app = request.app  # sub-app
+                    parent_app = getattr(global_app.state, 'parent_app', None)
+                    # For now store enable flags at parent level; fallback to current
+                    state_app = parent_app or request.app
+                    server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
+                    tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
+                    if not server_enabled or not tool_enabled:
+                        return JSONResponse(status_code=403, content=build_error("Tool disabled", 403, code="disabled", structured=structured))
+                    # Determine effective timeout
+                    default_timeout = getattr(request.app.state, "tool_timeout", 30)
+                    max_timeout = getattr(request.app.state, "tool_timeout_max", default_timeout)
+                    override = request.headers.get("X-Tool-Timeout") or request.query_params.get("timeout")
+                    effective_timeout = default_timeout
+                    if override is not None:
+                        try:
+                            effective_timeout = int(override)
+                        except ValueError:
+                            return JSONResponse(status_code=400, content=build_error("Invalid timeout value", 400, code="invalid_timeout", structured=structured))
+                    if effective_timeout <= 0 or effective_timeout > max_timeout:
+                        return JSONResponse(status_code=400, content=build_error("Timeout out of allowed range", 400, code="invalid_timeout", data={"max": max_timeout}, structured=structured))
+
+                    try:
+                        result = await asyncio.wait_for(session.call_tool(endpoint_name, arguments=args), timeout=effective_timeout)
+                    except asyncio.TimeoutError:
+                        return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
                         error_message = "Unknown tool execution error"
-                        error_data = None  # Initialize error_data
-                        if result.content:
-                            if isinstance(result.content[0], types.TextContent):
-                                error_message = result.content[0].text
-                        detail = {"message": error_message}
-                        if error_data is not None:
-                            detail["data"] = error_data
-                        raise HTTPException(
+                        if result.content and isinstance(result.content[0], types.TextContent):
+                            error_message = result.content[0].text
+                        # Unified envelope
+                        return JSONResponse(
                             status_code=500,
-                            detail=detail,
+                            content=build_error(error_message, 500, structured=structured),
                         )
 
-                    response_data = process_tool_response(result)
-                    final_response = (
-                        response_data[0] if len(response_data) == 1 else response_data
-                    )
-                    return final_response
+                    response_items = process_tool_response(result)
+                    final_response = response_items[0] if len(response_items) == 1 else response_items
+                    return JSONResponse(content=build_success(final_response, response_items, structured))
 
                 except McpError as e:
                     logger.info(
                         f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
                     )
                     status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
-                    raise HTTPException(
+                    return JSONResponse(
                         status_code=status_code,
-                        detail=(
-                            {"message": e.error.message, "data": e.error.data}
-                            if e.error.data is not None
-                            else {"message": e.error.message}
+                        content=build_error(
+                            e.error.message,
+                            status_code,
+                            code=e.error.code,
+                            data=e.error.data,
+                            structured=structured,
                         ),
                     )
                 except Exception as e:
                     logger.info(
                         f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
                     )
-                    raise HTTPException(
+                    return JSONResponse(
                         status_code=500,
-                        detail={"message": "Unexpected error", "error": str(e)},
+                        content=build_error("Unexpected error", 500, data={"error": str(e)}, structured=structured),
                     )
 
             return tool
@@ -357,51 +435,70 @@ def get_tool_handler(
         def make_endpoint_func_no_args(
             endpoint_name: str, session: ClientSession
         ):  # Parameterless endpoint
-            async def tool():  # No parameters
+            async def tool(request: Request):  # No parameters
                 logger.info(f"Calling endpoint: {endpoint_name}, with no args")
+                structured = getattr(request.app.state, "structured_output", False)
                 try:
-                    result = await session.call_tool(
-                        endpoint_name, arguments={}
-                    )  # Empty dict
+                    server_name = request.app.title
+                    global_app = request.app
+                    parent_app = getattr(global_app.state, 'parent_app', None)
+                    state_app = parent_app or request.app
+                    server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
+                    tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
+                    if not server_enabled or not tool_enabled:
+                        return JSONResponse(status_code=403, content=build_error("Tool disabled", 403, code="disabled", structured=structured))
+                    default_timeout = getattr(request.app.state, "tool_timeout", 30)
+                    max_timeout = getattr(request.app.state, "tool_timeout_max", default_timeout)
+                    override = request.headers.get("X-Tool-Timeout") or request.query_params.get("timeout")
+                    effective_timeout = default_timeout
+                    if override is not None:
+                        try:
+                            effective_timeout = int(override)
+                        except ValueError:
+                            return JSONResponse(status_code=400, content=build_error("Invalid timeout value", 400, code="invalid_timeout", structured=structured))
+                    if effective_timeout <= 0 or effective_timeout > max_timeout:
+                        return JSONResponse(status_code=400, content=build_error("Timeout out of allowed range", 400, code="invalid_timeout", data={"max": max_timeout}, structured=structured))
+
+                    try:
+                        result = await asyncio.wait_for(session.call_tool(endpoint_name, arguments={}), timeout=effective_timeout)  # Empty dict
+                    except asyncio.TimeoutError:
+                        return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
                         error_message = "Unknown tool execution error"
-                        if result.content:
-                            if isinstance(result.content[0], types.TextContent):
-                                error_message = result.content[0].text
-                        detail = {"message": error_message}
-                        raise HTTPException(
+                        if result.content and isinstance(result.content[0], types.TextContent):
+                            error_message = result.content[0].text
+                        return JSONResponse(
                             status_code=500,
-                            detail=detail,
+                            content=build_error(error_message, 500, structured=structured),
                         )
 
-                    response_data = process_tool_response(result)
-                    final_response = (
-                        response_data[0] if len(response_data) == 1 else response_data
-                    )
-                    return final_response
+                    response_items = process_tool_response(result)
+                    final_response = response_items[0] if len(response_items) == 1 else response_items
+                    return JSONResponse(content=build_success(final_response, response_items, structured))
 
                 except McpError as e:
                     logger.info(
                         f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
                     )
                     status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
-                    # Propagate the error received from MCP as an HTTP exception
-                    raise HTTPException(
+                    return JSONResponse(
                         status_code=status_code,
-                        detail=(
-                            {"message": e.error.message, "data": e.error.data}
-                            if e.error.data is not None
-                            else {"message": e.error.message}
+                        content=build_error(
+                            e.error.message,
+                            status_code,
+                            code=e.error.code,
+                            data=e.error.data,
+                            structured=structured,
                         ),
                     )
                 except Exception as e:
                     logger.info(
                         f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
                     )
-                    raise HTTPException(
+                    return JSONResponse(
                         status_code=500,
-                        detail={"message": "Unexpected error", "error": str(e)},
+                        content=build_error("Unexpected error", 500, data={"error": str(e)}, structured=structured),
                     )
 
             return tool
