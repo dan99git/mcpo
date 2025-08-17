@@ -129,7 +129,7 @@ Each with a dedicated OpenAPI schema and proxy handler. Access full schema UI at
 
 ## 🔧 Requirements
 
-- Python 3.8+
+- Python 3.11+ (runtime requirement; earlier README line corrected for consistency with pyproject)
 - uv (optional, but highly recommended for performance + packaging)
 
 ## 🛠️ Development & Testing
