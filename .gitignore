@@ -18,6 +18,7 @@ config.jsonref-mcpo-control-panel/
 .python-version
 mcpo.json.backup
 *.mcpo.json.backup
+mcpo.json
 
 # Local config artifacts / safety
 mcpo.local*.json
