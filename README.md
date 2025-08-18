@@ -6,6 +6,25 @@ mcpo is a dead-simple proxy that takes an MCP server command and makes it access
 
 No custom protocol. No glue code. No hassle.
 
+### 🔔 Release Highlights (0.0.18)
+> Snapshot of what’s new in this development baseline versus earlier public releases.
+
+- 🎛️ **Management UI (`/ui`)**: Live logs, config + requirements editing, tool visibility & toggling.
+- 🛠 **Internal Self-Managing Tools**: `mcpo_internal` exposes management operations at `/mcpo/openapi.json`.
+- ♻️ **Dynamic Config & Dependencies**: Edit `mcpo.json` & `requirements.txt` (with backups) and hot-reload without restarts.
+- ⏱ **Per-Tool Timeouts**: Default + per-request override + max guard; consistent error envelope.
+- 🧪 **Structured Output (Experimental)**: `--structured-output` adds a normalized collection envelope.
+- 🌐 **SSE & Streamable HTTP Support**: Specify `--server-type sse|streamable-http`; protocol-version header injected automatically.
+- 🔐 **Enable/Disable Controls**: Servers & individual tools manageable via meta endpoints and UI.
+- 🔎 **Rich Meta API (`/_meta/*`)**: Introspection, config content, logs, reload, reinit, dependency save endpoints.
+
+Upgrade notes:
+- No breaking CLI changes; existing single-server usage unchanged.
+- To enable internal management tools, add the `mcpo_internal` server block in your config (see config example below).
+- Structured output is optional & evolving—omit the flag for prior simple `{ ok, result }` responses.
+
+_For full details, see sections: Management Interface & Internal Tools, Tool Timeout, Structured Output._
+
 ## 🤔 Why Use mcpo Instead of Native MCP?
 
 MCP servers usually speak over raw stdio, which is:
@@ -116,7 +135,11 @@ Example config.json:
     "mcp_streamable_http": {
       "type": "streamable-http",
       "url": "http://127.0.0.1:8002/mcp"
-    } // Streamable HTTP MCP Server
+    }, // Streamable HTTP MCP Server
+    "mcpo_internal": {
+      "type": "mcpo-internal",
+      "enabled": true
+    } // Internal MCPO management tools
   }
 }
 ```
@@ -126,6 +149,17 @@ Each tool will be accessible under its own unique route, e.g.:
 - http://localhost:8000/time
 
 Each with a dedicated OpenAPI schema and proxy handler. Access full schema UI at: `http://localhost:8000/<tool>/docs`  (e.g. /memory/docs, /time/docs)
+
+### 📦 Automatic Python Dependency Management
+
+mcpo automatically handles Python dependencies for smooth operation:
+
+- **Startup Installation**: If a `requirements.txt` file exists in the working directory, mcpo will automatically run `pip install -r requirements.txt` during server startup
+- **UI Management**: Edit dependencies directly through the management interface at `/ui` under the "Config" tab
+- **Hot Reload**: Saving `requirements.txt` via the UI triggers automatic installation and server reload
+- **Backup Protection**: Configuration and dependency files are automatically backed up before modification
+
+This ensures all required packages are available without manual intervention, enabling self-contained deployments and dynamic dependency management.
 
 ### Health Endpoint
 
@@ -176,9 +210,36 @@ Enable `--structured-output` to wrap each tool response in a normalized envelope
 
 This early experimental format will evolve to support multiple mixed content items (text, images, resources) aligned with upcoming MCP spec extensions. Omit the flag to preserve the original simpler `{ ok, result }` shape.
 
-## � MCP Server Settings UI (`/mcp`)
+## 📋 Management Interface & Internal Tools
 
-When the optional React settings app is present, it mounts at `/mcp` (fallback minimal list UI also available at `/ui`). It exposes live server + tool management.
+mcpo provides multiple interfaces for monitoring and managing your MCP servers:
+
+### 🎛️ Management UI (`/ui`)
+
+A comprehensive web interface for real-time server management:
+
+- **Live Server Monitoring**: View all configured servers with connection status and tool counts
+- **Real-time Logs**: Monitor server activity with live log streaming (last 500 entries)
+- **Configuration Editor**: Edit `mcpo.json` directly with JSON validation and instant reload
+- **Dependency Management**: Manage Python dependencies via `requirements.txt` with automatic installation
+- **Tool Visibility**: Expand server panels to see all available tools and their enable/disable status
+
+Access the management interface at `http://localhost:8000/ui` when running mcpo.
+
+### 🛠️ Internal MCP Tools (`/mcpo`)
+
+mcpo exposes its own management capabilities as discoverable MCP tools, making it a self-managing system. These tools are available at `http://localhost:8000/mcpo/openapi.json`:
+
+- **`install_python_package`**: Dynamically install Python packages via pip
+- **`get_config`**: Retrieve the current `mcpo.json` configuration
+- **`post_config`**: Update the configuration and trigger server reload
+- **`get_logs`**: Retrieve the last 20 server log entries
+
+This allows AI models and external systems to manage mcpo programmatically, enabling self-modifying and adaptive tool ecosystems.
+
+### 🔄 Legacy Settings UI (`/mcp`)
+
+When the optional React settings app is present, it mounts at `/mcp`. This provides the original management interface with theme toggle and server management capabilities.
 
 ### Meta / Control Endpoints
 
@@ -195,11 +256,64 @@ When the optional React settings app is present, it mounts at `/mcp` (fallback m
 | `/_meta/reload` | POST | Diff & reload config (add/remove/update servers) |
 | `/_meta/reinit/{server}` | POST | Reinitialize single server session (fresh MCP handshake) |
 | `/_meta/config` | GET | Return config path (if config mode) |
+| `/_meta/logs` | GET | Return last 500 server log entries for UI display |
+| `/_meta/config/content` | GET | Get formatted `mcpo.json` configuration content |
+| `/_meta/config/save` | POST | Save and validate configuration with backup and reload |
+| `/_meta/requirements/content` | GET | Get `requirements.txt` content |
+| `/_meta/requirements/save` | POST | Save Python dependencies and trigger installation |
 
 Disabled items return HTTP 403:
 
 ```json
 { "ok": false, "error": { "message": "Tool disabled", "code": "disabled" } }
+```
+
+### Management Behavior & Persistence
+
+- Server add/remove is config-driven. The UI exposes an "Open Configuration" action to open your `mcpo.json`; use `/_meta/reload` (and optionally `/_meta/reinit/{server}`) after edits. No in-UI destructive modal is required.
+- Server enable/disable toggles persist to `mcpo.json` under `mcpServers.<name>.enabled` and are seeded on startup/reload.
+- Tool enable/disable toggles are enforced at call time and currently in-memory only (non-persistent) to keep config stable. A sidecar persistence may be added later if needed.
+
+### Protocol Compliance Notes
+
+- For remote MCP servers (SSE and Streamable HTTP), the `MCP-Protocol-Version` header is automatically injected (and merged with any provided headers) to comply with the 2025-06-18 spec.
+- For single-server mode, the same header is applied based on CLI `--type` and `--header` parameters.
+
+### cURL Examples
+
+List servers:
+
+```bash
+curl -s http://localhost:8000/_meta/servers | jq
+```
+
+Enable/disable a server (persists to config in config mode):
+
+```bash
+curl -s -X POST http://localhost:8000/_meta/servers/time/disable | jq
+curl -s -X POST http://localhost:8000/_meta/servers/time/enable | jq
+```
+
+Reload config after editing `mcpo.json`:
+
+```bash
+curl -s -X POST http://localhost:8000/_meta/reload | jq
+```
+
+Reinitialize a single server (reconnect + refresh tools):
+
+```bash
+curl -s -X POST http://localhost:8000/_meta/reinit/time | jq
+```
+
+Add/remove server (config mode only):
+
+```bash
+curl -s -X POST http://localhost:8000/_meta/servers \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"time","command":"uvx","args":["mcp-server-time","--local-timezone=America/New_York"]}' | jq
+
+curl -s -X DELETE http://localhost:8000/_meta/servers/time | jq
 ```
 
 ### Functional Brief (Summary)
@@ -221,6 +335,105 @@ Functional Brief: MCP Server Settings UI
   - Modal closable via X, Escape, or backdrop.
 
 > Added/removed servers persist only in config mode (writes to the active config JSON then invokes reload).
+
+## 🤖 LLM / Chat Model Automation
+
+mcpo has been ugraded so an LLM (via an agent framework) can safely introspect, plan, and apply configuration changes using only stable HTTP endpoints or the internal MCP management tools. This lets mcpo become a self-expanding tool substrate.
+
+### Core Capabilities (Bulleted Reference)
+
+Observability & Discovery:
+- View servers & tool counts: UI dashboard OR `GET /_meta/servers` (JSON)
+- List tools for a server (with enabled state): expand in UI OR `GET /_meta/servers/{server}/tools`
+- Health snapshot & generation counter: `GET /healthz`
+
+Server Lifecycle:
+- Enable / disable a server: UI toggle OR `POST /_meta/servers/{server}/enable` / `.../disable` (persists to config)
+- Reinitialize (fresh handshake) a single server: `POST /_meta/reinit/{server}`
+- Add a server (config mode): `POST /_meta/servers` with JSON body (writes to config + reload)
+- Remove a server (config mode): `DELETE /_meta/servers/{server}`
+- Reload all servers after config changes: `POST /_meta/reload`
+
+Tool Governance:
+- Enable / disable individual tools: UI tag toggle OR `POST /_meta/servers/{s}/tools/{t}/enable|disable`
+- Disabled tools return uniform `{ ok:false, error:{ code:"disabled" } }`
+- Tool toggles are in-memory (non-persistent) by design today (config stays clean)
+
+Configuration Management:
+- Fetch config path: `GET /_meta/config`
+- Read formatted config content: `GET /_meta/config/content`
+- Save updated config (validated, backed up, then atomic apply): `POST /_meta/config/save`
+- Internal MCP tools mirror this via `get_config` and `post_config`
+
+Dependency Management:
+- Read `requirements.txt`: `GET /_meta/requirements/content`
+- Save & auto-install dependencies: `POST /_meta/requirements/save` (triggers pip + reload)
+- Ad‑hoc package install (internal MCP tool): `install_python_package`
+
+Logs & Monitoring:
+- Live streaming log view in UI (rolling buffer ~500 entries)
+- Programmatic recent logs: `GET /_meta/logs` or internal `get_logs` (last slice)
+
+Protocol Support & Headers:
+- SSE & Streamable HTTP MCP servers auto-injected `MCP-Protocol-Version`
+
+Resilience & Safety:
+- Atomic config writes with timestamped backups before mutation
+- Uniform envelope for errors (`timeout`, `disabled`, `invalid_config`, etc.)
+- Health `generation` increments on reload for drift detection
+
+### How a Chat Model Can Add a New Server
+
+1. Retrieve current configuration:
+  - Via internal tool: call `get_config` → returns JSON (`mcpo.json`).
+  - Or HTTP: `GET /_meta/config/content` (string) then parse JSON.
+2. Parse & decide insertion (e.g., add a new SSE server named `issues`).
+3. Create a modified config object adding:
+```json
+"issues": {
+  "type": "sse",
+  "url": "https://internal.example.com/mcp/sse",
+  "headers": {"Authorization": "Bearer {{secret}}"},
+  "enabled": true
+}
+```
+4. Submit change:
+  - Internal tool: call `post_config` with full updated config JSON (mcpo validates + backups + reloads).
+  - Or HTTP: POST `/_meta/config/save` with body `{ "content": "<stringified formatted JSON>" }`.
+5. Confirm:
+  - `GET /_meta/servers` then locate `issues` with `connected:true` (after handshake) OR reinit if needed: `POST /_meta/reinit/issues`.
+
+### Natural Language Orchestration Example
+
+Prompt (user to agent):
+> "Add a new SSE MCP server pointing to https://tools.example.com/mcp/sse with name analytics, then disable any tool named debug across all servers."
+
+Agent plan (conceptual):
+1. Call `/_meta/servers` → inventory.
+2. Fetch & parse config (tool or HTTP) → check name uniqueness; insert `analytics` block.
+3. Save config (tool or HTTP) → server loads.
+4. Poll `/_meta/servers` until `analytics.connected==true` or timeout.
+5. For each server: `GET /_meta/servers/{server}/tools`; where tool.name==`debug` → POST disable endpoint.
+6. Return success summary.
+
+### Security & Governance Considerations
+
+- Per-tool disable allows a supervising model or human reviewer to quarantine newly surfaced or high-risk tools without removing the server entirely.
+- In-memory tool toggles reset on full restart (intentional) ensuring the file-backed config stays minimal; persistent tool-level governance can be layered externally (planned optional persistence hook).
+- Config save endpoints always create a timestamped backup before mutation, enabling recovery if an LLM introduces invalid structure.
+- Validation rejects malformed JSON early; partial merges are not applied—changes are atomic.
+
+### Envelope & Observability for Agents
+
+- Uniform success envelope `{ "ok": true, ... }`; failures: `{ "ok": false, "error": { code, message, data? } }` simplifies tool calling logic.
+- Timeouts yield code `timeout`; disabled yields code `disabled`; invalid changes code `invalid_config` (or similar) enabling structured branching without natural language parsing.
+- Agents can monitor drift or reload events by comparing `generation` and `lastReload` fields from `GET /healthz`.
+
+### Granular Tool Governance (Why It Matters)
+
+Turning off a single expensive or risky tool prevents resource exhaustion or data exfiltration while keeping the rest of the server productive. This is crucial when exposing large multi-tool MCP servers to autonomous agents that may explore capabilities unpredictably. The UI surfaces these toggles prominently; the API mirrors them for automation.
+
+---
 
 
 ## �🔧 Requirements
