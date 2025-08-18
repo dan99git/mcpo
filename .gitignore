@@ -1,4 +1,4 @@
-# Python-generated files
+﻿# Python-generated files
 __pycache__/
 *.py[oc]
 build/
@@ -7,5 +7,27 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
-config.json
+.venv/
+
+# Tooling artifacts
+config.jsonref-mcpo-control-panel/
+
+# Environment & secrets
+.env
+.env.*
+.python-version
+mcpo.json.backup
+*.mcpo.json.backup
+
+# Local config artifacts / safety
+mcpo.local*.json
+*.bak
+*.swp
+*.tmp
+
+# Dependency lock (optional to keep reproducible builds, comment out if you want to track)
+# requirements.txt
+
+# OS noise
+Thumbs.db
+Desktop.ini
