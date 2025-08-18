@@ -2,6 +2,23 @@
 
 ## Unreleased (feat/phase1-baseline)
 ### Added
+- 🎛️ **Real-time Log Monitoring & UI Management**: Complete management interface at `/ui` with live server logs, configuration editing, and comprehensive tool visibility
+- 🔧 **Dynamic Configuration Management**: Edit `mcpo.json` directly through the UI with real-time validation, backup creation, and instant server reload
+- 📦 **Python Dependency Management**: UI-based `requirements.txt` editing with automatic `pip install` on server startup and reload
+- 🛠️ **Self-Managed Internal Tools**: MCPO now exposes its own management capabilities as discoverable MCP tools at `/mcpo/openapi.json`
+  - `install_python_package`: Dynamically install Python packages via pip
+  - `get_config`: Retrieve current `mcpo.json` configuration
+  - `post_config`: Update configuration and trigger server reload
+  - `get_logs`: Retrieve last 20 server log entries
+- 📊 **Enhanced Log Buffer System**: In-memory log capture with thread-safe access for real-time UI display via `/_meta/logs`
+- 🔄 **Advanced Configuration Endpoints**: Complete CRUD operations for configuration management
+  - `/_meta/config/content`: Get formatted `mcpo.json` content
+  - `/_meta/config/save`: Save and validate configuration with backup and reload
+  - `/_meta/requirements/content`: Get `requirements.txt` content
+  - `/_meta/requirements/save`: Save dependencies and trigger installation
+- 🎨 **Modern Configuration UI**: Single-page interface with tabs for servers, logs, and configuration editing
+- 🔍 **Tool Call Execution Logging**: Comprehensive logging of MCP tool calls with success/failure tracking and detailed error reporting
+- 🏗️ **Internal MCP Server Architecture**: Self-hosted tools using mock MCP sessions for seamless integration with existing tool discovery
 - `/healthz` endpoint and health snapshot
 - Pydantic config models (`AppConfig`, `ServerConfig`)
 - Global reload lock for atomic config reloads
