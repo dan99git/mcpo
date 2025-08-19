@@ -81,6 +81,12 @@ def main(
     read_only: Annotated[
         Optional[bool], typer.Option("--read-only", help="Disable all mutating management endpoints (adds, reloads, enables, config writes)")
     ] = False,
+    protocol_version_mode: Annotated[
+        Optional[str], typer.Option("--protocol-version-mode", help="MCP-Protocol-Version negotiation mode: off|warn|enforce")
+    ] = "warn",
+    validate_output_mode: Annotated[
+        Optional[str], typer.Option("--validate-output-mode", help="Tool output schema validation mode: off|warn|enforce")
+    ] = "off",
 ):
     server_command = None
     if not config_path:
@@ -157,6 +163,8 @@ def main(
             tool_timeout_max=tool_timeout_max,
             structured_output=structured_output,
             read_only=read_only,
+            protocol_version_mode=protocol_version_mode,
+            validate_output_mode=validate_output_mode,
         )
     )
 

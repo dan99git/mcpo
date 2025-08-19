@@ -1054,6 +1054,9 @@ async def build_main_app(
     tool_timeout_max = int(kwargs.get("tool_timeout_max", 600))
     structured_output = kwargs.get("structured_output", False)
     read_only_mode = kwargs.get("read_only", False)
+    protocol_version_mode = kwargs.get("protocol_version_mode", "warn")  # off|warn|enforce
+    validate_output_mode = kwargs.get("validate_output_mode", "off")  # off|warn|enforce
+    supported_protocol_versions = kwargs.get("supported_protocol_versions") or [MCP_VERSION]
 
     # MCP Server
     server_type = normalize_server_type(kwargs.get("server_type"))
@@ -1116,6 +1119,7 @@ async def build_main_app(
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
         lifespan=lifespan,
+        openapi_version="3.1.0",
     )
     # Enable state maps - load from persisted state if available
     persisted_state = load_state_file(config_path)
@@ -1126,9 +1130,13 @@ async def build_main_app(
         "tool_calls_total": 0,
         "tool_errors_total": 0,
         "tool_errors_by_code": {},  # code -> count
+        "per_tool": {},  # tool_name -> stats dict
     }
     main_app.state.config_path = config_path  # Store for state persistence
     main_app.state.read_only_mode = read_only_mode
+    main_app.state.protocol_version_mode = protocol_version_mode
+    main_app.state.validate_output_mode = validate_output_mode
+    main_app.state.supported_protocol_versions = supported_protocol_versions
 
     # Standardized error handlers
     @main_app.exception_handler(Exception)
@@ -1179,6 +1187,14 @@ async def build_main_app(
 
     # Register health endpoint early
     _register_health_endpoint(main_app)
+
+    # Startup security / hardening audit warnings
+    if not api_key and not read_only_mode:
+        logger.warning("Security: Server running without API key and not in read-only mode – management endpoints are writable.")
+    if protocol_version_mode != "enforce":
+        logger.info(f"Protocol negotiation not enforced (mode={protocol_version_mode}).")
+    if validate_output_mode != "enforce":
+        logger.info(f"Output schema validation not enforced (mode={validate_output_mode}).")
 
     # Lightweight meta endpoints (server + tool discovery) and static UI
     @main_app.get("/_meta/servers")
@@ -1257,11 +1273,24 @@ async def build_main_app(
         for tmap in tool_enabled_map.values():
             tools_enabled += sum(1 for v in tmap.values() if v)
         m = getattr(main_app.state, 'metrics', {})
+        per_tool_metrics = {}
+        for tname, stats in m.get('per_tool', {}).items():
+            if not isinstance(stats, dict):
+                continue
+            calls = stats.get('calls', 0) or 0
+            total_latency = stats.get('total_latency_ms', 0.0) or 0.0
+            per_tool_metrics[tname] = {
+                'calls': calls,
+                'errors': stats.get('errors', 0) or 0,
+                'avgLatencyMs': round(total_latency / calls, 3) if calls else 0.0,
+                'maxLatencyMs': stats.get('max_latency_ms', 0.0) or 0.0,
+            }
         return {"ok": True, "metrics": {
             "servers": {"total": servers_total, "enabled": servers_enabled},
             "tools": {"total": tools_total, "enabled": tools_enabled},
             "calls": {"total": m.get("tool_calls_total", 0)},
-            "errors": {"total": m.get("tool_errors_total", 0), "byCode": m.get("tool_errors_by_code", {})}
+            "errors": {"total": m.get("tool_errors_total", 0), "byCode": m.get("tool_errors_by_code", {})},
+            "perTool": per_tool_metrics,
         }}
 
     @main_app.post("/_meta/reload")
