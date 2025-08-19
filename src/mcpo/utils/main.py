@@ -370,6 +370,11 @@ def get_tool_handler(
                     server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
                     tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
                     if not server_enabled or not tool_enabled:
+                        # Metrics: count disabled as error with code 'disabled'
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['disabled'] = metrics['tool_errors_by_code'].get('disabled', 0) + 1
                         return JSONResponse(status_code=403, content=build_error("Tool disabled", 403, code="disabled", structured=structured))
                     # Determine effective timeout
                     default_timeout = getattr(request.app.state, "tool_timeout", 30)
@@ -386,13 +391,24 @@ def get_tool_handler(
 
                     try:
                         result = await asyncio.wait_for(session.call_tool(endpoint_name, arguments=args), timeout=effective_timeout)
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_calls_total'] += 1
                     except asyncio.TimeoutError:
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['timeout'] = metrics['tool_errors_by_code'].get('timeout', 0) + 1
                         return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
                         error_message = "Unknown tool execution error"
                         if result.content and isinstance(result.content[0], types.TextContent):
                             error_message = result.content[0].text
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['tool_error'] = metrics['tool_errors_by_code'].get('tool_error', 0) + 1
                         # Unified envelope
                         return JSONResponse(
                             status_code=500,
@@ -446,6 +462,10 @@ def get_tool_handler(
                     server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
                     tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
                     if not server_enabled or not tool_enabled:
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['disabled'] = metrics['tool_errors_by_code'].get('disabled', 0) + 1
                         return JSONResponse(status_code=403, content=build_error("Tool disabled", 403, code="disabled", structured=structured))
                     default_timeout = getattr(request.app.state, "tool_timeout", 30)
                     max_timeout = getattr(request.app.state, "tool_timeout_max", default_timeout)
@@ -461,13 +481,24 @@ def get_tool_handler(
 
                     try:
                         result = await asyncio.wait_for(session.call_tool(endpoint_name, arguments={}), timeout=effective_timeout)  # Empty dict
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_calls_total'] += 1
                     except asyncio.TimeoutError:
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['timeout'] = metrics['tool_errors_by_code'].get('timeout', 0) + 1
                         return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
                         error_message = "Unknown tool execution error"
                         if result.content and isinstance(result.content[0], types.TextContent):
                             error_message = result.content[0].text
+                        metrics = getattr(state_app.state, 'metrics', None)
+                        if metrics is not None:
+                            metrics['tool_errors_total'] += 1
+                            metrics['tool_errors_by_code']['tool_error'] = metrics['tool_errors_by_code'].get('tool_error', 0) + 1
                         return JSONResponse(
                             status_code=500,
                             content=build_error(error_message, 500, structured=structured),
@@ -482,6 +513,10 @@ def get_tool_handler(
                         f"MCP Error calling {endpoint_name}: {traceback.format_exc()}"
                     )
                     status_code = MCP_ERROR_TO_HTTP_STATUS.get(e.error.code, 500)
+                    metrics = getattr(state_app.state, 'metrics', None)
+                    if metrics is not None:
+                        metrics['tool_errors_total'] += 1
+                        metrics['tool_errors_by_code'][e.error.code] = metrics['tool_errors_by_code'].get(e.error.code, 0) + 1
                     return JSONResponse(
                         status_code=status_code,
                         content=build_error(
@@ -496,6 +531,10 @@ def get_tool_handler(
                     logger.info(
                         f"Unexpected error calling {endpoint_name}: {traceback.format_exc()}"
                     )
+                    metrics = getattr(state_app.state, 'metrics', None)
+                    if metrics is not None:
+                        metrics['tool_errors_total'] += 1
+                        metrics['tool_errors_by_code']['unexpected'] = metrics['tool_errors_by_code'].get('unexpected', 0) + 1
                     return JSONResponse(
                         status_code=500,
                         content=build_error("Unexpected error", 500, data={"error": str(e)}, structured=structured),

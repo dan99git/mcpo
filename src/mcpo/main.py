@@ -1121,6 +1121,12 @@ async def build_main_app(
     persisted_state = load_state_file(config_path)
     main_app.state.server_enabled = persisted_state["server_enabled"]
     main_app.state.tool_enabled = persisted_state["tool_enabled"]
+    # Metrics counters (simple in-memory; reset on restart)
+    main_app.state.metrics = {
+        "tool_calls_total": 0,
+        "tool_errors_total": 0,
+        "tool_errors_by_code": {},  # code -> count
+    }
     main_app.state.config_path = config_path  # Store for state persistence
     main_app.state.read_only_mode = read_only_mode
 
@@ -1233,6 +1239,30 @@ async def build_main_app(
     async def config_info():  # noqa: D401
         path = getattr(main_app.state, 'config_path', None)
         return {"ok": True, "configPath": path}
+
+    @main_app.get("/_meta/metrics")
+    async def metrics_snapshot():  # noqa: D401
+        """Return a lightweight operational metrics snapshot.
+
+        This is a stub (no persistence / no histograms) intended to be extended.
+        Counts are derived from in-memory state; tool call/error counters are incremented
+        inside the dynamic tool handlers.
+        """
+        server_enabled_map = getattr(main_app.state, 'server_enabled', {})
+        tool_enabled_map = getattr(main_app.state, 'tool_enabled', {})
+        servers_total = len(server_enabled_map)
+        servers_enabled = sum(1 for v in server_enabled_map.values() if v)
+        tools_total = sum(len(tool_map) for tool_map in tool_enabled_map.values())
+        tools_enabled = 0
+        for tmap in tool_enabled_map.values():
+            tools_enabled += sum(1 for v in tmap.values() if v)
+        m = getattr(main_app.state, 'metrics', {})
+        return {"ok": True, "metrics": {
+            "servers": {"total": servers_total, "enabled": servers_enabled},
+            "tools": {"total": tools_total, "enabled": tools_enabled},
+            "calls": {"total": m.get("tool_calls_total", 0)},
+            "errors": {"total": m.get("tool_errors_total", 0), "byCode": m.get("tool_errors_by_code", {})}
+        }}
 
     @main_app.post("/_meta/reload")
     async def reload_config():  # noqa: D401
