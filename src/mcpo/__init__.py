@@ -78,6 +78,9 @@ def main(
     structured_output: Annotated[
         Optional[bool], typer.Option("--structured-output", help="Return unified structured response object instead of raw list flattening")
     ] = False,
+    read_only: Annotated[
+        Optional[bool], typer.Option("--read-only", help="Disable all mutating management endpoints (adds, reloads, enables, config writes)")
+    ] = False,
 ):
     server_command = None
     if not config_path:
@@ -153,6 +156,7 @@ def main(
             tool_timeout=tool_timeout,
             tool_timeout_max=tool_timeout_max,
             structured_output=structured_output,
+            read_only=read_only,
         )
     )
 

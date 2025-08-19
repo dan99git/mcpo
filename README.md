@@ -44,7 +44,25 @@ What feels like "one more step" is really fewer steps with better outcomes.
 
 mcpo makes your AI tools usable, secure, and interoperable—right now, with zero hassle.
 
-## 🚀 Quick Usage
+## � Fork Transparency & Scope
+
+This branch (`feat/phase1-baseline`) focuses on a minimal, locally-trusted deployment profile. Some auth-related libraries (JWT / passlib) have been removed for now to reduce surface area; only a simple shared API key model is supported. See `DECISIONS.md` for architectural rationales and pending items.
+
+### Current Non-Goals (Phase 1)
+- Multi-tenant or per-user auth
+- Fine-grained role-based access control
+- Persistent metrics / observability backend
+- Full state resumption (only enable/disable flags persist)
+
+### Known Gaps
+- No metrics endpoint yet (planned simple `/ _meta/metrics` returning counters)
+- Structured output format is experimental and may change
+- Management mutation operations are not yet exhaustively tested beyond happy paths
+- SSE / streamable sessions do not auto-reconnect with backoff (manual reinit required)
+
+If you need any of the above, treat this build as a baseline and extend accordingly.
+
+## �🚀 Quick Usage
 
 We recommend using uv for lightning-fast startup and zero config.
 
@@ -210,7 +228,17 @@ Enable `--structured-output` to wrap each tool response in a normalized envelope
 
 This early experimental format will evolve to support multiple mixed content items (text, images, resources) aligned with upcoming MCP spec extensions. Omit the flag to preserve the original simpler `{ ok, result }` shape.
 
-## 📋 Management Interface & Internal Tools
+### Read-Only Mode
+
+For embedding mcpo in environments where configuration must not change at runtime, launch with:
+
+```bash
+mcpo --read-only --config ./mcpo.json
+```
+
+All mutating endpoints (reload, reinit, enable/disable, add/remove, config/requirements writes) will return HTTP 403 (`code: read_only`).
+
+## 🖥 MCP Server Settings UI (`/mcp`)
 
 mcpo provides multiple interfaces for monitoring and managing your MCP servers:
 
@@ -512,3 +540,15 @@ Not sure where to start? Feel free to open an issue or ask a question—we’re 
 ---
 
 ✨ Let's build the future of interoperable AI tooling together!
+
+---
+
+### 🔐 Security Model Summary
+- Assumes trusted local network / single-tenant context
+- Single shared API key (Bearer or Basic password) protects endpoints when provided
+- `--strict-auth` also protects documentation UIs
+- Use reverse proxies for TLS termination if not using native `--ssl-*` flags
+- Prefer `--read-only` in packaged distributions to prevent unexpected mutation
+
+### 🧭 Architectural Decisions
+See `DECISIONS.md` for detailed rationale, invariants, and the execution queue.

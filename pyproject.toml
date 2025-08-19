@@ -12,13 +12,17 @@ dependencies = [
     "fastapi>=0.115.12",
     "mcp>=1.12.1",
     "mcp[cli]>=1.12.1",
-    "passlib[bcrypt]>=1.7.4",
     "pydantic>=2.11.1",
-    "pyjwt[crypto]>=2.10.1",
     "python-dotenv>=1.1.0",
     "typer>=0.15.2",
     "uvicorn>=0.34.0",
     "watchdog>=4.0.0",
+]
+
+[project.optional-dependencies]
+auth = [
+    "passlib[bcrypt]>=1.7.4",
+    "pyjwt[crypto]>=2.10.1",
 ]
 
 [project.scripts]

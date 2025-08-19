@@ -4,11 +4,10 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 import base64
 
-from passlib.context import CryptContext
-from datetime import UTC, datetime, timedelta
-
-import jwt
 from typing import Optional, Union, List, Dict
+
+# Note: passlib / jwt removed from default dependencies for phase 1 baseline.
+# If reintroducing signed session tokens, add optional dependency group `auth`.
 
 
 ALGORITHM = "HS256"
