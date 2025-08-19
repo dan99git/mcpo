@@ -1,6 +1,7 @@
 import json
 import asyncio
 import traceback
+import time
 from typing import Any, Dict, ForwardRef, List, Optional, Type, Union
 import logging
 from fastapi import HTTPException, Request
@@ -360,6 +361,7 @@ def get_tool_handler(
                 args = form_data.model_dump(exclude_none=True, by_alias=True)
                 logger.info(f"Calling endpoint: {endpoint_name}, with args: {args}")
                 structured = getattr(request.app.state, "structured_output", False)
+                start_time = time.perf_counter()
                 try:
                     # Enforced enable/disable state
                     server_name = request.app.title
@@ -367,6 +369,21 @@ def get_tool_handler(
                     parent_app = getattr(global_app.state, 'parent_app', None)
                     # For now store enable flags at parent level; fallback to current
                     state_app = parent_app or request.app
+                    # Protocol version negotiation
+                    pv_mode = getattr(state_app.state, 'protocol_version_mode', 'warn')
+                    supported = getattr(state_app.state, 'supported_protocol_versions', [])
+                    client_pv = request.headers.get('MCP-Protocol-Version')
+                    if pv_mode != 'off':
+                        if not client_pv or client_pv not in supported:
+                            msg = 'Unsupported or missing MCP-Protocol-Version'
+                            if pv_mode == 'enforce':
+                                metrics = getattr(state_app.state, 'metrics', None)
+                                if metrics is not None:
+                                    metrics['tool_errors_total'] += 1
+                                    metrics['tool_errors_by_code']['protocol'] = metrics['tool_errors_by_code'].get('protocol', 0) + 1
+                                return JSONResponse(status_code=426, content=build_error(msg, 426, code='protocol', data={'supported': supported}, structured=structured))
+                            else:
+                                logger.warning(f"Protocol warn: {msg}; supported={supported}; received={client_pv}")
                     server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
                     tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
                     if not server_enabled or not tool_enabled:
@@ -394,11 +411,16 @@ def get_tool_handler(
                         metrics = getattr(state_app.state, 'metrics', None)
                         if metrics is not None:
                             metrics['tool_calls_total'] += 1
+                            # per tool metrics
+                            pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                            pt['calls'] += 1
                     except asyncio.TimeoutError:
                         metrics = getattr(state_app.state, 'metrics', None)
                         if metrics is not None:
                             metrics['tool_errors_total'] += 1
                             metrics['tool_errors_by_code']['timeout'] = metrics['tool_errors_by_code'].get('timeout', 0) + 1
+                            pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                            pt['errors'] += 1
                         return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
@@ -417,6 +439,33 @@ def get_tool_handler(
 
                     response_items = process_tool_response(result)
                     final_response = response_items[0] if len(response_items) == 1 else response_items
+                    # Output schema validation (warn/enforce)
+                    v_mode = getattr(state_app.state, 'validate_output_mode', 'off')
+                    if v_mode != 'off':
+                        # Since models are dynamic, we rely on ResponseModel if present
+                        try:
+                            if ResponseModel is not Any:
+                                ResponseModel.model_validate(final_response)  # type: ignore
+                        except Exception as ve:
+                            msg = f'Output validation failed: {ve}'
+                            if v_mode == 'enforce':
+                                metrics = getattr(state_app.state, 'metrics', None)
+                                if metrics is not None:
+                                    metrics['tool_errors_total'] += 1
+                                    metrics['tool_errors_by_code']['output_validation'] = metrics['tool_errors_by_code'].get('output_validation', 0) + 1
+                                    pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                                    pt['errors'] += 1
+                                return JSONResponse(status_code=502, content=build_error('Output schema validation failed', 502, code='output_validation', data={'detail': str(ve)}, structured=structured))
+                            else:
+                                logger.warning(msg)
+                    # Record latency after all processing
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                    metrics = getattr(state_app.state, 'metrics', None)
+                    if metrics is not None:
+                        pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                        pt['total_latency_ms'] += elapsed_ms
+                        if elapsed_ms > pt.get('max_latency_ms', 0.0):
+                            pt['max_latency_ms'] = elapsed_ms
                     return JSONResponse(content=build_success(final_response, response_items, structured))
 
                 except McpError as e:
@@ -454,11 +503,27 @@ def get_tool_handler(
             async def tool(request: Request):  # No parameters
                 logger.info(f"Calling endpoint: {endpoint_name}, with no args")
                 structured = getattr(request.app.state, "structured_output", False)
+                start_time = time.perf_counter()
                 try:
                     server_name = request.app.title
                     global_app = request.app
                     parent_app = getattr(global_app.state, 'parent_app', None)
                     state_app = parent_app or request.app
+                    # Protocol version negotiation
+                    pv_mode = getattr(state_app.state, 'protocol_version_mode', 'warn')
+                    supported = getattr(state_app.state, 'supported_protocol_versions', [])
+                    client_pv = request.headers.get('MCP-Protocol-Version')
+                    if pv_mode != 'off':
+                        if not client_pv or client_pv not in supported:
+                            msg = 'Unsupported or missing MCP-Protocol-Version'
+                            if pv_mode == 'enforce':
+                                metrics = getattr(state_app.state, 'metrics', None)
+                                if metrics is not None:
+                                    metrics['tool_errors_total'] += 1
+                                    metrics['tool_errors_by_code']['protocol'] = metrics['tool_errors_by_code'].get('protocol', 0) + 1
+                                return JSONResponse(status_code=426, content=build_error(msg, 426, code='protocol', data={'supported': supported}, structured=structured))
+                            else:
+                                logger.warning(f"Protocol warn: {msg}; supported={supported}; received={client_pv}")
                     server_enabled = getattr(state_app.state, 'server_enabled', {}).get(server_name, True)
                     tool_enabled = getattr(state_app.state, 'tool_enabled', {}).get(server_name, {}).get(endpoint_name, True)
                     if not server_enabled or not tool_enabled:
@@ -484,11 +549,15 @@ def get_tool_handler(
                         metrics = getattr(state_app.state, 'metrics', None)
                         if metrics is not None:
                             metrics['tool_calls_total'] += 1
+                            pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                            pt['calls'] += 1
                     except asyncio.TimeoutError:
                         metrics = getattr(state_app.state, 'metrics', None)
                         if metrics is not None:
                             metrics['tool_errors_total'] += 1
                             metrics['tool_errors_by_code']['timeout'] = metrics['tool_errors_by_code'].get('timeout', 0) + 1
+                            pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                            pt['errors'] += 1
                         return JSONResponse(status_code=504, content=build_error("Tool timed out", 504, code="timeout", data={"timeoutSeconds": effective_timeout}, structured=structured))
 
                     if result.isError:
@@ -506,6 +575,30 @@ def get_tool_handler(
 
                     response_items = process_tool_response(result)
                     final_response = response_items[0] if len(response_items) == 1 else response_items
+                    v_mode = getattr(state_app.state, 'validate_output_mode', 'off')
+                    if v_mode != 'off':
+                        try:
+                            if ResponseModel is not Any:
+                                ResponseModel.model_validate(final_response)  # type: ignore
+                        except Exception as ve:
+                            msg = f'Output validation failed: {ve}'
+                            if v_mode == 'enforce':
+                                metrics = getattr(state_app.state, 'metrics', None)
+                                if metrics is not None:
+                                    metrics['tool_errors_total'] += 1
+                                    metrics['tool_errors_by_code']['output_validation'] = metrics['tool_errors_by_code'].get('output_validation', 0) + 1
+                                    pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                                    pt['errors'] += 1
+                                return JSONResponse(status_code=502, content=build_error('Output schema validation failed', 502, code='output_validation', data={'detail': str(ve)}, structured=structured))
+                            else:
+                                logger.warning(msg)
+                    elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+                    metrics = getattr(state_app.state, 'metrics', None)
+                    if metrics is not None:
+                        pt = metrics['per_tool'].setdefault(endpoint_name, {'calls': 0, 'errors': 0, 'total_latency_ms': 0.0, 'max_latency_ms': 0.0})
+                        pt['total_latency_ms'] += elapsed_ms
+                        if elapsed_ms > pt.get('max_latency_ms', 0.0):
+                            pt['max_latency_ms'] = elapsed_ms
                     return JSONResponse(content=build_success(final_response, response_items, structured))
 
                 except McpError as e:
