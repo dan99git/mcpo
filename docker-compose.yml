@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  mcpo:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - MCPO_API_KEY=${MCPO_API_KEY:-top-secret}
+    volumes:
+      # Mount config and requirements for persistence
+      - ./mcpo.json:/app/mcpo.json:rw
+      - ./requirements.txt:/app/requirements.txt:rw
+      # Mount static UI files for development
+      - ./static:/app/static:rw
+      # Optional: Mount logs directory for persistence
+      - mcpo_logs:/app/logs
+    command: ["--config", "mcpo.json", "--hot-reload", "--port", "8000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  mcpo_logs:

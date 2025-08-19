@@ -38,10 +38,13 @@
 - In-browser settings UI at `/mcp` with theme toggle, >40 tool warning, expandable server panels
 - Add / remove server endpoints (config mode persistence) and modal (Git analysis stub + manual path)
 - Open config action (vscode:// deep link) from UI
+- `--read-only` flag to disable all mutating management endpoints for safer embedding/distribution
+- Versioned, atomic state persistence for server/tool enable flags (`*_state.json` with temp-file replace)
 
 ### Changed
 - Correct README Python version to 3.11+
 - Cleanup duplicate imports
+- Removed unused JWT/passlib dependencies from default install (simplifies surface area; API key model only in phase 1)
 
 ### Planned / Pending
 - Expanded structured output (streaming, richer resource metadata)
