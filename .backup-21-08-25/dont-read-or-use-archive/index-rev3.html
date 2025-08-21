@@ -1,10 +1,11 @@
-<!DOCTYPE html>
+
+<DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MCPO - ChatGPT Style UI</title>
-  <style>
+    <style>
         /* ChatGPT Design System */
         :root {
             /* Light theme */
@@ -760,17 +761,17 @@
                         <div class="card-header">
                             <h2 class="card-title">Active Servers</h2>
                             <button class="btn" onclick="openConfigPage()">Configuration</button>
-                            </div>
-
+                        </div>
+                        
                         <!-- Tools Limit Warning -->
                         <div class="tools-warning" id="tools-warning" style="display: none;">
                             <div class="warning-icon">⚠️</div>
                             <div class="warning-content">
                                 <div class="warning-title">Exceeding total tools limit</div>
                                 <div class="warning-message">You have <span id="total-tools-count">0</span> tools from enabled servers. Too many tools can degrade performance, and some models may not respect more than 40 tools.</div>
-                                </div>
                             </div>
-
+                        </div>
+                        
                         <div class="card-content">
                             <!-- Servers will be dynamically loaded here -->
                         </div>
@@ -851,7 +852,7 @@ numpy>=1.21.0</textarea>
                 <div class="page" id="docs-page">
                     <div class="card">
                         <div class="card-header">
-                            <h2 class="card-title">🔧 Understanding MCP Servers (Model Context Protocol)</h2>
+                            <h2 class="card-title">Getting Started</h2>
                         </div>
                         <div class="card-content" style="padding: 16px;">
                             <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Quick Start</h3>
@@ -890,18 +891,18 @@ numpy>=1.21.0</textarea>
                             </p>
                             
                             <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 12px;">
-                                {<br>
-                                &nbsp;&nbsp;"mcpServers": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;"my-server": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "npx",<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["-y", "@my/mcp-server"],<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"env": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"API_KEY": "your-key-here"<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                                &nbsp;&nbsp;}<br>
-                                }
+{<br>
+&nbsp;&nbsp;"mcpServers": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"my-server": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "npx",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["-y", "@my/mcp-server"],<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"env": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"API_KEY": "your-key-here"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;}<br>
+}
                             </div>
 
                             <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Environment Variables</h3>
@@ -943,10 +944,8 @@ numpy>=1.21.0</textarea>
                         </div>
                     </div>
                 </div>
-                <!-- Documentation page loads from external file -->
-                <div class="page" id="documentation-page">
-                    <div class="loading-message">Loading documentation...</div>
-                </div>
+                <!-- Blank extra Documentation page (placeholder) -->
+                <div class="page" id="documentation-page"></div>
             </main>
         </div>
     </div>
@@ -1259,7 +1258,7 @@ numpy>=1.21.0</textarea>
                 updateStatusCounts();
             } catch (error) {
                 console.error('Failed to update server states:', error);
-    }
+            }
         }
 
         async function renderServerList() {
@@ -1312,7 +1311,7 @@ numpy>=1.21.0</textarea>
             `;
             
             return serverItem;
-    }
+        }
 
         function updateServerVisuals(serverName) {
             const serverItem = document.querySelector(`[data-server="${serverName}"]`);
@@ -1421,7 +1420,7 @@ numpy>=1.21.0</textarea>
             } catch (e) {
                 alert('Invalid JSON: ' + e.message);
             }
-    }
+        }
 
         async function resetConfig() {
             if (confirm('Reset configuration to last saved version?')) {
@@ -1474,13 +1473,13 @@ numpy>=1.21.0</textarea>
             }
         }
 
-                // Load requirements content on init
+        // Load requirements content on init
         async function loadRequirementsContent() {
             try {
                 const response = await fetch('/_meta/requirements/content');
                 const data = await response.json();
                 if (data.ok) {
-                    const editor = document.querySelector('.config-editor[style*="min-height: 120px"]'); 
+                    const editor = document.querySelector('.config-editor[style*="min-height: 120px"]');
                     if (editor) {
                         editor.value = data.content;
                     }
@@ -1489,24 +1488,6 @@ numpy>=1.21.0</textarea>
                 }
             } catch (error) {
                 console.error('Error loading requirements:', error);
-            }
-        }
-
-        // Load external documentation content
-        async function loadDocumentationContent() {
-            const docPage = document.getElementById('documentation-page');
-            if (!docPage) return;
-            try {
-                const response = await fetch('/ui/docs/mcp-guide.html');
-                if (response.ok) {
-                    const content = await response.text();
-                    docPage.innerHTML = content.trim() ? content : '<p>Documentation not found.</p>';
-                } else {
-                    docPage.innerHTML = '<p>Failed to load documentation.</p>';
-                }
-            } catch (error) {
-                console.error('Error loading documentation:', error);
-                docPage.innerHTML = '<p>Error loading documentation.</p>';
             }
         }
 
@@ -1559,21 +1540,19 @@ numpy>=1.21.0</textarea>
             }
         });
 
-                // Initialize with Persistence
+        // Initialize with Persistence
         document.addEventListener('DOMContentLoaded', async () => {
             // Load persisted state first
             loadTheme();
             loadCurrentPage();
-
+            
             // Then load dynamic content
             await updateServerStates();
             await updateLogs();
             await loadConfigContent();
             await loadRequirementsContent();
-            await loadDocumentationContent();
             startPolling();
         });
-  </script>
-  <footer>mcpo minimal UI • <a href="https://github.com/open-webui/mcpo" target="_blank">GitHub</a></footer>
+    </script>
 </body>
 </html>

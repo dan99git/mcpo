@@ -1,0 +1,45 @@
+﻿# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv/
+venv/
+
+# Configuration files (local/runtime)
+config.json
+mcpo.json
+mcpo.json.backup
+*.mcpo.json.backup
+mcpo.local*.json
+*_state.json
+*_state.json.tmp
+
+# Environment & secrets
+.env
+.env.*
+.python-version
+
+# Temp / backup artifacts
+*.bak
+*.swp
+*.swo
+*.tmp
+*~
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS noise
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Logs
+*.log
+logs/

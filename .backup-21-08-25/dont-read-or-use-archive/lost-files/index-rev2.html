@@ -1494,19 +1494,23 @@ numpy>=1.21.0</textarea>
 
         // Load external documentation content
         async function loadDocumentationContent() {
-            const docPage = document.getElementById('documentation-page');
-            if (!docPage) return;
             try {
                 const response = await fetch('/ui/docs/mcp-guide.html');
-                if (response.ok) {
-                    const content = await response.text();
-                    docPage.innerHTML = content.trim() ? content : '<p>Documentation not found.</p>';
-                } else {
-                    docPage.innerHTML = '<p>Failed to load documentation.</p>';
+                const content = await response.text();
+                const docPage = document.getElementById('documentation-page');
+                if (docPage) {
+                    if (content.trim()) {
+                        docPage.innerHTML = content;
+                    } else {
+                        docPage.innerHTML = '<div class="card"><div class="card-content" style="padding: 16px;"><p style="color: var(--text-secondary);">Documentation content is not available.</p></div></div>';
+                    }
                 }
             } catch (error) {
                 console.error('Error loading documentation:', error);
-                docPage.innerHTML = '<p>Error loading documentation.</p>';
+                const docPage = document.getElementById('documentation-page');
+                if (docPage) {
+                    docPage.innerHTML = '<div class="card"><div class="card-content" style="padding: 16px;"><p style="color: var(--text-secondary);">Failed to load documentation content.</p></div></div>';
+                }
             }
         }
 

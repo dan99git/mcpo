@@ -1,0 +1,541 @@
+
+            <main class="main-content">
+                <!-- MCP Tools Page -->
+                <div class="page active" id="tools-page">
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Active Servers</h2>
+                            <button class="btn" onclick="openConfigPage()">Configuration</button>
+                        </div>
+                        <div class="card-content">
+                            <!-- Time Server -->
+                            <div class="server-item" data-server="time">
+                                <div class="server-header" onclick="toggleServerExpansion('time')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">time</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">2 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'time')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'get_current_time')">get_current_time</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'convert_time')">convert_time</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Perplexity Server -->
+                            <div class="server-item" data-server="perplexity">
+                                <div class="server-header" onclick="toggleServerExpansion('perplexity')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">perplexity</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">3 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'perplexity')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'search')">search</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'reason')">reason</span>
+                                        <span class="tool-tag disabled" onclick="toggleTool(this, 'deep_research')">deep_research</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Filesystem Server (Disconnected) -->
+                            <div class="server-item" data-server="filesystem">
+                                <div class="server-header" onclick="toggleServerExpansion('filesystem')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">filesystem</div>
+                                            <div class="status-beacon error"></div>
+                                        </div>
+                                        <div class="server-status">Disconnected • Error</div>
+                                        <div class="tool-count">3 tools unavailable</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle" onclick="event.stopPropagation(); toggleServer(this, 'filesystem')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'read_file')">read_file</span>
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'write_file')">write_file</span>
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'list_directory')">list_directory</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Memory Server -->
+                            <div class="server-item" data-server="memory">
+                                <div class="server-header" onclick="toggleServerExpansion('memory')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">memory</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">4 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'memory')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'store')">store</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'retrieve')">retrieve</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'search_memory')">search_memory</span>
+                                        <span class="tool-tag disabled" onclick="toggleTool(this, 'delete')">delete</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Add Server Form removed per requirement -->
+                </div>
+
+                <!-- Logs Page -->
+                <div class="page" id="logs-page">
+                    <div class="logs-container">
+                        <div class="logs-header">
+                            <h2 class="card-title">Live Server Logs</h2>
+                            <div style="display: flex; gap: 6px;">
+                                <button class="btn">Clear</button>
+                                <button class="btn btn-primary">Restart All</button>
+                            </div>
+                        </div>
+                        <div class="logs-content" id="logs-content">
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:15</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Starting MCPO Server...</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:15</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Port: 8000</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:16</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Loading MCP server configurations</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:16</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Initiating connection for server: 'time'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:17</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'time'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:17</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Initiating connection for server: 'perplexity'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:18</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'perplexity'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:19</span>
+                                <span class="log-level error">ERROR</span>
+                                <span>Failed to connect to 'filesystem' server</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:20</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'memory'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:20</span>
+                                <span class="log-level info">INFO</span>
+                                <span>All available servers initialized</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Configuration Page -->
+                <div class="page" id="config-page">
+                    <div class="config-section">
+                        <h2 class="section-title">Server Configuration</h2>
+                        <p class="section-description">Edit your mcpo.json configuration file. Changes will be applied automatically.</p>
+                        
+                        <textarea class="config-editor json-editor" id="server-config-editor">{
+  "mcpServers": {
+    "time": {
+      "command": "uvx",
+      "args": ["mcp-server-time"],
+      "enabled": true
+    },
+    "perplexity": {
+      "command": "npx",
+      "args": ["-y", "perplexity-mcp"],
+      "enabled": true,
+      "env": {
+        "PERPLEXITY_API_KEY": "your-api-key-here"
+      }
+    },
+    "memory": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"],
+      "enabled": true
+    }
+  }
+}</textarea>
+
+                        <div class="config-actions">
+                            <button class="btn">Validate</button>
+                            <button class="btn">Reset</button>
+                            <button class="btn btn-primary">Save Configuration</button>
+                        </div>
+                    </div>
+
+                    <div class="config-section">
+                        <h2 class="section-title">Python Dependencies</h2>
+                        <p class="section-description">Manage Python packages required by your MCP servers. One package per line.</p>
+                        
+                        <textarea class="config-editor" style="min-height: 120px;"># Python packages for MCP servers
+requests>=2.25.0
+pandas>=1.3.0
+numpy>=1.21.0</textarea>
+
+                        <div class="config-actions">
+                            <button class="btn">Install Dependencies</button>
+                            <button class="btn btn-primary">Save Requirements</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Documentation Page -->
+                <div class="page" id="docs-page">
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Getting Started</h2>
+                        </div>
+                        <div class="card-content" style="padding: 16px;">
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Quick Start</h3>
+                            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4;">
+                                MCPO automatically discovers and exposes MCP tools as HTTP endpoints. Configure your servers in the Configuration tab.
+                            </p>
+                            
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">API Endpoints</h3>
+                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 12px;">
+                                <div style="margin-bottom: 4px;"><strong>GET</strong> /{server}/docs - OpenAPI documentation</div>
+                                <div style="margin-bottom: 4px;"><strong>POST</strong> /{server}/{tool} - Execute tool</div>
+                                <div><strong>GET</strong> /_meta/servers - List all servers</div>
+                            </div>
+
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Example Usage</h3>
+                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 12px;">
+                                <div style="color: var(--text-secondary);"># Get current time</div>
+                                <div>curl -X POST http://localhost:8000/time/get_current_time</div>
+                                <br>
+                                <div style="color: var(--text-secondary);"># Search with Perplexity</div>
+                                <div>curl -X POST http://localhost:8000/perplexity/search \</div>
+                                <div>&nbsp;&nbsp;-H "Content-Type: application/json" \</div>
+                                <div>&nbsp;&nbsp;-d '{"query": "latest AI news"}'</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Configuration Guide</h2>
+                        </div>
+                        <div class="card-content" style="padding: 16px;">
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Server Configuration</h3>
+                            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.4;">
+                                Edit <code style="background: var(--bg-secondary); padding: 2px 4px; border-radius: 2px;">mcpo.json</code> to add or modify MCP servers:
+                            </p>
+                            
+                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 12px;">
+{<br>
+&nbsp;&nbsp;"mcpServers": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"my-server": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "npx",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["-y", "@my/mcp-server"],<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"env": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"API_KEY": "your-key-here"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;}<br>
+}
+                            </div>
+
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Environment Variables</h3>
+                            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px;">
+                                <div style="margin-bottom: 4px;"><strong>MCPO_PORT</strong> - Server port (default: 8000)</div>
+                                <div style="margin-bottom: 4px;"><strong>MCPO_HOST</strong> - Server host (default: 0.0.0.0)</div>
+                                <div><strong>MCPO_API_KEY</strong> - Optional API key for authentication</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">Troubleshooting</h2>
+                        </div>
+                        <div class="card-content" style="padding: 16px;">
+                            <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Common Issues</h3>
+                            
+                            <div style="margin-bottom: 12px;">
+                                <div style="font-size: 12px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px;">Server shows "Disconnected"</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.4;">
+                                    Check that the command and arguments are correct. Ensure required packages are installed.
+                                </div>
+                            </div>
+
+                            <div style="margin-bottom: 12px;">
+                                <div style="font-size: 12px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px;">Tools not appearing</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.4;">
+                                    Restart the server from the Logs page. Check server logs for connection errors.
+                                </div>
+                            </div>
+
+                            <div>
+                                <div style="font-size: 12px; font-weight: 500; color: var(--text-primary); margin-bottom: 4px;">API calls failing</div>
+                                <div style="font-size: 11px; color: var(--text-secondary); line-height: 1.4;">
+                                    Verify the tool is enabled and server is connected. Check request payload matches expected schema.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <!-- Blank extra Documentation page (placeholder) -->
+                <div class="page" id="documentation-page"></div>
+            </main>
+        </div>
+    </div>
+
+    <script>
+        // Server State Management
+        const serverStates = {
+            time: { enabled: true, connected: true, tools: { get_current_time: true, convert_time: true } },
+            perplexity: { enabled: true, connected: true, tools: { search: true, reason: true, deep_research: false } },
+            filesystem: { enabled: false, connected: false, tools: { read_file: false, write_file: false, list_directory: false } },
+            memory: { enabled: true, connected: true, tools: { store: true, retrieve: true, search_memory: true, delete: false } }
+        };
+
+        // Theme Management
+        function toggleTheme() {
+            const body = document.body;
+            const currentTheme = body.getAttribute('data-theme');
+            const newTheme = currentTheme === 'light' ? 'dark' : 'light';
+            body.setAttribute('data-theme', newTheme);
+
+            // Update logo image based on theme
+            const logoCircle = document.querySelector('.logo-circle');
+            logoCircle.src = newTheme === 'dark' ? 'logos/OI-logo-d.png' : 'logos/OI-logo-light.png';
+
+            updateThemeToggle();
+        }
+
+        function updateThemeToggle() {
+            const theme = document.body.getAttribute('data-theme');
+            const indicator = document.getElementById('theme-indicator');
+            const label = document.getElementById('theme-label');
+            if (!indicator || !label) return;
+            if (theme === 'dark') {
+                indicator.innerHTML = `<svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M9.37,5.51C9.19,6.15,9.1,6.82,9.1,7.5c0,4.08,3.32,7.4,7.4,7.4c0.68,0,1.35-0.09,1.99-0.27C17.45,17.19,14.93,19,12,19 c-3.86,0-7-3.14-7-7C5,9.07,6.81,6.55,9.37,5.51z M12,3c-4.97,0-9,4.03-9,9s4.03,9,9,9s9-4.03,9-9c0-0.46-0.04-0.92-0.1-1.36 c-0.98,1.37-2.58,2.26-4.4,2.26c-2.98,0-5.4-2.42-5.4-5.4c0-1.81,0.89-3.42,2.26-4.4C12.92,3.04,12.46,3,12,3L12,3z"></path></svg>`;
+                label.textContent = 'Dark Theme';
+            } else {
+                indicator.innerHTML = `<svg viewBox=\"0 0 24 24\" width=\"16\" height=\"16\" aria-hidden=\"true\"><path fill=\"currentColor\" d=\"M12,9c1.65,0,3,1.35,3,3s-1.35,3-3,3s-3-1.35-3-3S10.35,9,12,9 M12,7c-2.76,0-5,2.24-5,5s2.24,5,5,5s5-2.24,5-5 S14.76,7,12,7L12,7z M2,13l2,0c0.55,0,1-0.45,1-1s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S1.45,13,2,13z M20,13l2,0c0.55,0,1-0.45,1-1 s-0.45-1-1-1l-2,0c-0.55,0-1,0.45-1,1S19.45,13,20,13z M11,2v2c0,0.55,0.45,1,1,1s1-0.45,1-1V2c0-0.55-0.45-1-1-1S11,1.45,11,2z M11,20v2c0,0.55,0.45,1,1,1s1-0.45,1-1v-2c0-0.55-0.45-1-1-1C11.45,19,11,19.45,11,20z M5.99,4.58c-0.39-0.39-1.03-0.39-1.41,0 c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0s0.39-1.03,0-1.41L5.99,4.58z M18.36,16.95 c-0.39-0.39-1.03-0.39-1.41,0c-0.39,0.39-0.39,1.03,0,1.41l1.06,1.06c0.39,0.39,1.03,0.39,1.41,0c0.39-0.39,0.39-1.03,0-1.41 L18.36,16.95z M19.42,5.99c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06c-0.39,0.39-0.39,1.03,0,1.41 s1.03,0.39,1.41,0L19.42,5.99z M7.05,18.36c0.39-0.39,0.39-1.03,0-1.41c-0.39-0.39-1.03-0.39-1.41,0l-1.06,1.06 c-0.39,0.39-0.39,1.03,0,1.41s1.03,0.39,1.41,0L7.05,18.36z\"></path></svg>`;
+                label.textContent = 'Light Theme';
+            }
+        }
+
+        // Navigation Management
+        const navItems = document.querySelectorAll('.nav-item');
+        const pages = document.querySelectorAll('.page');
+
+        navItems.forEach(item => {
+            item.addEventListener('click', () => {
+                const targetPage = item.getAttribute('data-page');
+                
+                // Update navigation
+                navItems.forEach(nav => nav.classList.remove('active'));
+                item.classList.add('active');
+                
+                // Update pages
+                pages.forEach(page => page.classList.remove('active'));
+                document.getElementById(`${targetPage}-page`).classList.add('active');
+            });
+        });
+
+        // Server Expansion Management
+        function toggleServerExpansion(serverName) {
+            const serverItem = document.querySelector(`[data-server="${serverName}"]`);
+            const dropdown = serverItem.querySelector('.tools-dropdown');
+            
+            serverItem.classList.toggle('expanded');
+            dropdown.classList.toggle('expanded');
+        }
+
+        // Server Toggle Management
+        function toggleServer(toggle, serverName) {
+            const isEnabled = !serverStates[serverName].enabled;
+            serverStates[serverName].enabled = isEnabled;
+            
+            // Update toggle visual
+            toggle.classList.toggle('on', isEnabled);
+            
+            // Update beacon visibility
+            const serverItem = document.querySelector(`[data-server="${serverName}"]`);
+            const beacon = serverItem.querySelector('.status-beacon');
+            
+            if (isEnabled && serverStates[serverName].connected) {
+                beacon.className = 'status-beacon connected';
+            } else if (isEnabled && !serverStates[serverName].connected) {
+                beacon.className = 'status-beacon error';
+            } else {
+                beacon.className = 'status-beacon hidden';
+            }
+            
+            // Update tool states
+            const tools = serverItem.querySelectorAll('.tool-tag');
+            tools.forEach(tool => {
+                if (isEnabled && serverStates[serverName].connected) {
+                    tool.classList.remove('inactive');
+                } else {
+                    tool.classList.add('inactive');
+                }
+            });
+            
+            updateStatusCounts();
+        }
+
+        // Tool Toggle Management
+        function toggleTool(toolElement, toolName) {
+            if (toolElement.classList.contains('inactive')) return;
+            
+            const serverName = toolElement.closest('[data-server]').getAttribute('data-server');
+            const currentState = serverStates[serverName].tools[toolName];
+            
+            // Toggle tool state
+            serverStates[serverName].tools[toolName] = !currentState;
+            
+            // Update visual state
+            if (!currentState) {
+                toolElement.classList.remove('disabled');
+                toolElement.classList.add('enabled');
+            } else {
+                toolElement.classList.remove('enabled');
+                toolElement.classList.add('disabled');
+            }
+            
+            updateStatusCounts();
+        }
+
+        // Update Status Counts
+        function updateStatusCounts() {
+            let activeServers = 0;
+            let enabledTools = 0;
+            
+            Object.entries(serverStates).forEach(([serverName, state]) => {
+                if (state.enabled && state.connected) {
+                    activeServers++;
+                }
+                
+                if (state.enabled) {
+                    Object.values(state.tools).forEach(toolEnabled => {
+                        if (toolEnabled) enabledTools++;
+                    });
+                }
+            });
+            
+            document.getElementById('server-count').textContent = `${activeServers} active`;
+            document.getElementById('tool-count').textContent = `${enabledTools} enabled`;
+        }
+
+        // Navigate to config page from tools button
+        function openConfigPage() {
+            const targetPage = 'config';
+            // update nav active state
+            document.querySelectorAll('.nav-item').forEach(nav => {
+                nav.classList.toggle('active', nav.getAttribute('data-page') === targetPage);
+            });
+            // show page
+            document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+            document.getElementById(`${targetPage}-page`).classList.add('active');
+        }
+
+        // Auto-scroll logs
+        function simulateLogUpdates() {
+            const logsContent = document.getElementById('logs-content');
+            const messages = [
+                'Health check completed',
+                'Tool call: get_current_time',
+                'Tool call: search',
+                'Configuration validated',
+                'Server heartbeat received',
+                'Tool call: store memory',
+                'Tool call: retrieve memory'
+            ];
+            
+            setInterval(() => {
+                const timestamp = new Date().toLocaleTimeString('en-GB', {hour12: false}).substring(0, 8);
+                const message = messages[Math.floor(Math.random() * messages.length)];
+                
+                const logEntry = document.createElement('div');
+                logEntry.className = 'log-entry';
+                logEntry.innerHTML = `
+                    <span class="log-timestamp">${timestamp}</span>
+                    <span class="log-level info">INFO</span>
+                    <span>${message}</span>
+                `;
+                
+                logsContent.appendChild(logEntry);
+                
+                // Keep only last 50 entries
+                const entries = logsContent.querySelectorAll('.log-entry');
+                if (entries.length > 50) {
+                    entries[0].remove();
+                }
+                
+                logsContent.scrollTop = logsContent.scrollHeight;
+            }, 4000);
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            simulateLogUpdates();
+            updateStatusCounts();
+            updateThemeToggle();
+        });

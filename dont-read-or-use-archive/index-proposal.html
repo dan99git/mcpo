@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>MCPO - ChatGPT Style UI</title>
-  <style>
+    <style>
         /* ChatGPT Design System */
         :root {
             /* Light theme */
@@ -533,42 +533,6 @@
         .log-level.error { color: var(--error); }
         .log-level.warning { color: #fd7e14; }
 
-        /* Tools Warning */
-        .tools-warning {
-            background: rgba(255, 152, 0, 0.1);
-            border: 1px solid rgba(255, 152, 0, 0.3);
-            border-radius: 8px;
-            padding: 12px;
-            margin: 0 24px 16px 24px;
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-        }
-
-        .warning-icon {
-            color: #ff9800;
-            font-size: 16px;
-            line-height: 1;
-            margin-top: 2px;
-        }
-
-        .warning-content {
-            flex: 1;
-        }
-
-        .warning-title {
-            color: #ff9800;
-            font-weight: 600;
-            font-size: 14px;
-            margin-bottom: 4px;
-        }
-
-        .warning-message {
-            color: var(--text-secondary);
-            font-size: 13px;
-            line-height: 1.4;
-        }
-
         /* Config Page */
         .config-section {
             margin-bottom: 24px;
@@ -760,19 +724,119 @@
                         <div class="card-header">
                             <h2 class="card-title">Active Servers</h2>
                             <button class="btn" onclick="openConfigPage()">Configuration</button>
-                            </div>
-
-                        <!-- Tools Limit Warning -->
-                        <div class="tools-warning" id="tools-warning" style="display: none;">
-                            <div class="warning-icon">⚠️</div>
-                            <div class="warning-content">
-                                <div class="warning-title">Exceeding total tools limit</div>
-                                <div class="warning-message">You have <span id="total-tools-count">0</span> tools from enabled servers. Too many tools can degrade performance, and some models may not respect more than 40 tools.</div>
+                        </div>
+                        <div class="card-content">
+                            <!-- Time Server -->
+                            <div class="server-item" data-server="time">
+                                <div class="server-header" onclick="toggleServerExpansion('time')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">time</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">2 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'time')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'get_current_time')">get_current_time</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'convert_time')">convert_time</span>
+                                    </div>
                                 </div>
                             </div>
 
-                        <div class="card-content">
-                            <!-- Servers will be dynamically loaded here -->
+                            <!-- Perplexity Server -->
+                            <div class="server-item" data-server="perplexity">
+                                <div class="server-header" onclick="toggleServerExpansion('perplexity')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">perplexity</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">3 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'perplexity')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'search')">search</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'reason')">reason</span>
+                                        <span class="tool-tag disabled" onclick="toggleTool(this, 'deep_research')">deep_research</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Filesystem Server (Disconnected) -->
+                            <div class="server-item" data-server="filesystem">
+                                <div class="server-header" onclick="toggleServerExpansion('filesystem')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">filesystem</div>
+                                            <div class="status-beacon error"></div>
+                                        </div>
+                                        <div class="server-status">Disconnected • Error</div>
+                                        <div class="tool-count">3 tools unavailable</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle" onclick="event.stopPropagation(); toggleServer(this, 'filesystem')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'read_file')">read_file</span>
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'write_file')">write_file</span>
+                                        <span class="tool-tag inactive" onclick="toggleTool(this, 'list_directory')">list_directory</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Memory Server -->
+                            <div class="server-item" data-server="memory">
+                                <div class="server-header" onclick="toggleServerExpansion('memory')">
+                                    <div class="server-info">
+                                        <div class="server-name-row">
+                                            <div class="server-name">memory</div>
+                                            <div class="status-beacon connected"></div>
+                                        </div>
+                                        <div class="server-status">Connected • Ready</div>
+                                        <div class="tool-count">4 tools available</div>
+                                    </div>
+                                    <div class="server-controls">
+                                        <a href="#" class="btn" onclick="event.stopPropagation()">Docs</a>
+                                        <div class="toggle on" onclick="event.stopPropagation(); toggleServer(this, 'memory')"></div>
+                                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="9,18 15,12 9,6"></polyline>
+                                        </svg>
+                                    </div>
+                                </div>
+                                <div class="tools-dropdown">
+                                    <div class="tools-grid">
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'store')">store</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'retrieve')">retrieve</span>
+                                        <span class="tool-tag enabled" onclick="toggleTool(this, 'search_memory')">search_memory</span>
+                                        <span class="tool-tag disabled" onclick="toggleTool(this, 'delete')">delete</span>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                     </div>
 
@@ -785,13 +849,62 @@
                         <div class="logs-header">
                             <h2 class="card-title">Live Server Logs</h2>
                             <div style="display: flex; gap: 6px;">
-                                <button class="btn" onclick="clearLogs()">Clear</button>
-                                <button class="btn btn-primary" onclick="restartAllServers()">Restart All</button>
+                                <button class="btn">Clear</button>
+                                <button class="btn btn-primary">Restart All</button>
                             </div>
                         </div>
                         <div class="logs-content" id="logs-content">
-                            <!-- Live logs will be loaded here -->
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:15</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Starting MCPO Server...</span>
                             </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:15</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Port: 8000</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:16</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Loading MCP server configurations</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:16</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Initiating connection for server: 'time'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:17</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'time'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:17</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Initiating connection for server: 'perplexity'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:18</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'perplexity'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:19</span>
+                                <span class="log-level error">ERROR</span>
+                                <span>Failed to connect to 'filesystem' server</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:20</span>
+                                <span class="log-level info">INFO</span>
+                                <span>Successfully connected to 'memory'</span>
+                            </div>
+                            <div class="log-entry">
+                                <span class="log-timestamp">14:30:20</span>
+                                <span class="log-level info">INFO</span>
+                                <span>All available servers initialized</span>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -825,9 +938,9 @@
 }</textarea>
 
                         <div class="config-actions">
-                            <button class="btn" onclick="validateConfig()">Validate</button>
-                            <button class="btn" onclick="resetConfig()">Reset</button>
-                            <button class="btn btn-primary" onclick="saveConfigContent()">Save Configuration</button>
+                            <button class="btn">Validate</button>
+                            <button class="btn">Reset</button>
+                            <button class="btn btn-primary">Save Configuration</button>
                         </div>
                     </div>
 
@@ -841,8 +954,8 @@ pandas>=1.3.0
 numpy>=1.21.0</textarea>
 
                         <div class="config-actions">
-                            <button class="btn" onclick="installDependencies()">Install Dependencies</button>
-                            <button class="btn btn-primary" onclick="saveRequirements()">Save Requirements</button>
+                            <button class="btn">Install Dependencies</button>
+                            <button class="btn btn-primary">Save Requirements</button>
                         </div>
                     </div>
                 </div>
@@ -851,7 +964,7 @@ numpy>=1.21.0</textarea>
                 <div class="page" id="docs-page">
                     <div class="card">
                         <div class="card-header">
-                            <h2 class="card-title">🔧 Understanding MCP Servers (Model Context Protocol)</h2>
+                            <h2 class="card-title">Getting Started</h2>
                         </div>
                         <div class="card-content" style="padding: 16px;">
                             <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Quick Start</h3>
@@ -890,18 +1003,18 @@ numpy>=1.21.0</textarea>
                             </p>
                             
                             <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; margin-bottom: 12px;">
-                                {<br>
-                                &nbsp;&nbsp;"mcpServers": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;"my-server": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "npx",<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["-y", "@my/mcp-server"],<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"env": {<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"API_KEY": "your-key-here"<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                                &nbsp;&nbsp;&nbsp;&nbsp;}<br>
-                                &nbsp;&nbsp;}<br>
-                                }
+{<br>
+&nbsp;&nbsp;"mcpServers": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;"my-server": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "npx",<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["-y", "@my/mcp-server"],<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"env": {<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"API_KEY": "your-key-here"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+&nbsp;&nbsp;}<br>
+}
                             </div>
 
                             <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Environment Variables</h3>
@@ -943,20 +1056,22 @@ numpy>=1.21.0</textarea>
                         </div>
                     </div>
                 </div>
-                <!-- Documentation page loads from external file -->
-                <div class="page" id="documentation-page">
-                    <div class="loading-message">Loading documentation...</div>
-                </div>
+                <!-- Blank extra Documentation page (placeholder) -->
+                <div class="page" id="documentation-page"></div>
             </main>
         </div>
     </div>
 
     <script>
-        // Server State Management - Connected to real backend
-        let serverStates = {};
-        let isPolling = false;
+        // Server State Management
+        const serverStates = {
+            time: { enabled: true, connected: true, tools: { get_current_time: true, convert_time: true } },
+            perplexity: { enabled: true, connected: true, tools: { search: true, reason: true, deep_research: false } },
+            filesystem: { enabled: false, connected: false, tools: { read_file: false, write_file: false, list_directory: false } },
+            memory: { enabled: true, connected: true, tools: { store: true, retrieve: true, search_memory: true, delete: false } }
+        };
 
-        // Theme Management with Persistence
+        // Theme Management
         function toggleTheme() {
             const body = document.body;
             const currentTheme = body.getAttribute('data-theme');
@@ -966,23 +1081,6 @@ numpy>=1.21.0</textarea>
             // Update logo image based on theme
             const logoCircle = document.querySelector('.logo-circle');
             logoCircle.src = newTheme === 'dark' ? 'logos/OI-logo-d.png' : 'logos/OI-logo-light.png';
-
-            // Persist theme preference
-            localStorage.setItem('mcpo-theme', newTheme);
-
-            updateThemeToggle();
-        }
-
-        function loadTheme() {
-            const savedTheme = localStorage.getItem('mcpo-theme') || 'light';
-            const body = document.body;
-            body.setAttribute('data-theme', savedTheme);
-
-            // Update logo image based on theme
-            const logoCircle = document.querySelector('.logo-circle');
-            if (logoCircle) {
-                logoCircle.src = savedTheme === 'dark' ? 'logos/OI-logo-d.png' : 'logos/OI-logo-light.png';
-            }
 
             updateThemeToggle();
         }
@@ -1028,39 +1126,51 @@ numpy>=1.21.0</textarea>
             dropdown.classList.toggle('expanded');
         }
 
-        // Server Toggle Management - Connected to backend
-        async function toggleServer(toggle, serverName) {
-            const currentState = serverStates[serverName];
-            const newEnabled = !currentState.enabled;
+        // Server Toggle Management
+        function toggleServer(toggle, serverName) {
+            const isEnabled = !serverStates[serverName].enabled;
+            serverStates[serverName].enabled = isEnabled;
             
-            // Optimistically update UI
-            toggle.classList.toggle('on', newEnabled);
+            // Update toggle visual
+            toggle.classList.toggle('on', isEnabled);
             
-            // Call backend API
-            const success = await toggleServerEnabled(serverName, newEnabled);
+            // Update beacon visibility
+            const serverItem = document.querySelector(`[data-server="${serverName}"]`);
+            const beacon = serverItem.querySelector('.status-beacon');
             
-            if (success) {
-                // Update local state
-                serverStates[serverName].enabled = newEnabled;
-                updateServerVisuals(serverName);
-                updateStatusCounts();
+            if (isEnabled && serverStates[serverName].connected) {
+                beacon.className = 'status-beacon connected';
+            } else if (isEnabled && !serverStates[serverName].connected) {
+                beacon.className = 'status-beacon error';
             } else {
-                // Revert UI on failure
-                toggle.classList.toggle('on', !newEnabled);
-                console.error(`Failed to toggle server ${serverName}`);
+                beacon.className = 'status-beacon hidden';
             }
+            
+            // Update tool states
+            const tools = serverItem.querySelectorAll('.tool-tag');
+            tools.forEach(tool => {
+                if (isEnabled && serverStates[serverName].connected) {
+                    tool.classList.remove('inactive');
+                } else {
+                    tool.classList.add('inactive');
+                }
+            });
+            
+            updateStatusCounts();
         }
 
-        // Tool Toggle Management - Connected to backend
-        async function toggleTool(toolElement, toolName) {
+        // Tool Toggle Management
+        function toggleTool(toolElement, toolName) {
             if (toolElement.classList.contains('inactive')) return;
             
             const serverName = toolElement.closest('[data-server]').getAttribute('data-server');
             const currentState = serverStates[serverName].tools[toolName];
-            const newEnabled = !currentState;
             
-            // Optimistically update UI
-            if (newEnabled) {
+            // Toggle tool state
+            serverStates[serverName].tools[toolName] = !currentState;
+            
+            // Update visual state
+            if (!currentState) {
                 toolElement.classList.remove('disabled');
                 toolElement.classList.add('enabled');
             } else {
@@ -1068,24 +1178,7 @@ numpy>=1.21.0</textarea>
                 toolElement.classList.add('disabled');
             }
             
-            // Call backend API
-            const success = await toggleToolEnabled(serverName, toolName, newEnabled);
-            
-            if (success) {
-                // Update local state
-                serverStates[serverName].tools[toolName] = newEnabled;
             updateStatusCounts();
-            } else {
-                // Revert UI on failure
-                if (!newEnabled) {
-                    toolElement.classList.remove('disabled');
-                    toolElement.classList.add('enabled');
-                } else {
-                    toolElement.classList.remove('enabled');
-                    toolElement.classList.add('disabled');
-                }
-                console.error(`Failed to toggle tool ${toolName} on server ${serverName}`);
-            }
         }
 
         // Update Status Counts
@@ -1107,17 +1200,6 @@ numpy>=1.21.0</textarea>
             
             document.getElementById('server-count').textContent = `${activeServers} active`;
             document.getElementById('tool-count').textContent = `${enabledTools} enabled`;
-            
-            // Show/hide tools warning based on 40 tool limit
-            const warningElement = document.getElementById('tools-warning');
-            const totalToolsElement = document.getElementById('total-tools-count');
-            
-            if (enabledTools > 40) {
-                totalToolsElement.textContent = enabledTools;
-                warningElement.style.display = 'flex';
-            } else {
-                warningElement.style.display = 'none';
-            }
         }
 
         // Navigate to config page from tools button
@@ -1132,448 +1214,49 @@ numpy>=1.21.0</textarea>
             document.getElementById(`${targetPage}-page`).classList.add('active');
         }
 
-        // Real API Functions
-        async function fetchServers() {
-            try {
-                const response = await fetch('/_meta/servers');
-                const data = await response.json();
-                if (data.ok) {
-                    return data.servers;
-                }
-                console.error('Failed to fetch servers:', data);
-                return [];
-            } catch (error) {
-                console.error('Error fetching servers:', error);
-                return [];
-            }
-        }
-
-        async function fetchServerTools(serverName) {
-            try {
-                const response = await fetch(`/_meta/servers/${serverName}/tools`);
-                const data = await response.json();
-                if (data.ok) {
-                    return data.tools;
-                }
-                console.error(`Failed to fetch tools for ${serverName}:`, data);
-                return [];
-            } catch (error) {
-                console.error(`Error fetching tools for ${serverName}:`, error);
-                return [];
-            }
-        }
-
-        async function toggleServerEnabled(serverName, enabled) {
-            try {
-                const endpoint = enabled ? 'enable' : 'disable';
-                const response = await fetch(`/_meta/servers/${serverName}/${endpoint}`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-                if (!data.ok) {
-                    console.error(`Failed to ${endpoint} server ${serverName}:`, data);
-                }
-                return data.ok;
-            } catch (error) {
-                console.error(`Error toggling server ${serverName}:`, error);
-                return false;
-            }
-        }
-
-        async function toggleToolEnabled(serverName, toolName, enabled) {
-            try {
-                const endpoint = enabled ? 'enable' : 'disable';
-                const response = await fetch(`/_meta/servers/${serverName}/tools/${toolName}/${endpoint}`, {
-                    method: 'POST'
-                });
-                const data = await response.json();
-                if (!data.ok) {
-                    console.error(`Failed to ${endpoint} tool ${toolName}:`, data);
-                }
-                return data.ok;
-            } catch (error) {
-                console.error(`Error toggling tool ${toolName}:`, error);
-                return false;
-            }
-        }
-
-        async function reloadConfig() {
-            try {
-                const response = await fetch('/_meta/reload', { method: 'POST' });
-                const data = await response.json();
-                if (data.ok) {
-                    console.log('Config reloaded successfully');
-                    await updateServerStates();
-                } else {
-                    console.error('Failed to reload config:', data);
-                }
-                return data.ok;
-            } catch (error) {
-                console.error('Error reloading config:', error);
-                return false;
-            }
-        }
-
-        async function reinitServer(serverName) {
-            try {
-                const response = await fetch(`/_meta/reinit/${serverName}`, { method: 'POST' });
-                const data = await response.json();
-                if (data.ok) {
-                    console.log(`Server ${serverName} reinitialized successfully`);
-                    await updateServerStates();
-                } else {
-                    console.error(`Failed to reinitialize server ${serverName}:`, data);
-                }
-                return data.ok;
-            } catch (error) {
-                console.error(`Error reinitializing server ${serverName}:`, error);
-                return false;
-            }
-        }
-
-        // Real server state management
-        async function updateServerStates() {
-            try {
-                const servers = await fetchServers();
-                const newStates = {};
-                
-                for (const server of servers) {
-                    const tools = await fetchServerTools(server.name);
-                    const toolStates = {};
-                    if (tools && tools.length > 0) {
-                        tools.forEach(tool => {
-                            toolStates[tool.name] = tool.enabled;
-                        });
-                    }
-                    
-                    newStates[server.name] = {
-                        enabled: server.enabled,
-                        connected: server.connected,
-                        tools: toolStates,
-                        basePath: server.basePath
-                    };
-                }
-                
-                serverStates = newStates;
-                await renderServerList();
-                updateStatusCounts();
-            } catch (error) {
-                console.error('Failed to update server states:', error);
-    }
-        }
-
-        async function renderServerList() {
-            const container = document.querySelector('.card-content');
-            if (!container) return;
-            
-            container.innerHTML = '';
-            
-            for (const [serverName, state] of Object.entries(serverStates)) {
-                const serverItem = createServerItem(serverName, state);
-                container.appendChild(serverItem);
-            }
-        }
-
-        function createServerItem(serverName, state) {
-            const serverItem = document.createElement('div');
-            serverItem.className = 'server-item';
-            serverItem.setAttribute('data-server', serverName);
-            
-            const toolCount = Object.keys(state.tools).length;
-            const enabledToolCount = state.enabled ? Object.values(state.tools).filter(Boolean).length : 0;
-            const statusText = state.connected ? 'Connected • Ready' : 'Disconnected • Error';
-            const toolText = state.connected ? `${enabledToolCount}/${toolCount} tools enabled` : `${toolCount} tools unavailable`;
-            
-            serverItem.innerHTML = `
-                <div class="server-header" onclick="toggleServerExpansion('${serverName}')">
-                    <div class="server-info">
-                        <div class="server-name-row">
-                            <div class="server-name">${serverName}</div>
-                            <div class="status-beacon ${state.enabled && state.connected ? 'connected' : state.enabled ? 'error' : 'hidden'}"></div>
-                        </div>
-                        <div class="server-status">${statusText}</div>
-                        <div class="tool-count">${toolText}</div>
-                    </div>
-                    <div class="server-controls">
-                        <a href="/${serverName}/docs" target="_blank" class="btn" onclick="event.stopPropagation()">Docs</a>
-                        <div class="toggle ${state.enabled ? 'on' : ''}" onclick="event.stopPropagation(); toggleServer(this, '${serverName}')"></div>
-                        <svg class="expand-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                            <polyline points="9,18 15,12 9,6"></polyline>
-                        </svg>
-                    </div>
-                </div>
-                <div class="tools-dropdown">
-                    <div class="tools-grid">
-                        ${Object.entries(state.tools).map(([toolName, enabled]) => 
-                            `<span class="tool-tag ${enabled ? 'enabled' : 'disabled'} ${state.enabled && state.connected ? '' : 'inactive'}" onclick="toggleTool(this, '${toolName}')">${toolName}</span>`
-                        ).join('')}
-                    </div>
-                </div>
-            `;
-            
-            return serverItem;
-    }
-
-        function updateServerVisuals(serverName) {
-            const serverItem = document.querySelector(`[data-server="${serverName}"]`);
-            if (!serverItem) return;
-            
-            const state = serverStates[serverName];
-            const beacon = serverItem.querySelector('.status-beacon');
-            const tools = serverItem.querySelectorAll('.tool-tag');
-            
-            if (state.enabled && state.connected) {
-                beacon.className = 'status-beacon connected';
-                tools.forEach(tool => tool.classList.remove('inactive'));
-            } else if (state.enabled && !state.connected) {
-                beacon.className = 'status-beacon error';
-                tools.forEach(tool => tool.classList.add('inactive'));
-            } else {
-                beacon.className = 'status-beacon hidden';
-                tools.forEach(tool => tool.classList.add('inactive'));
-            }
-        }
-
-        // Real log fetching
-        async function fetchLogs() {
-            try {
-                const response = await fetch('/_meta/logs');
-                const data = await response.json();
-                if (data.ok) {
-                    return data.logs;
-                }
-                console.error('Failed to fetch logs:', data);
-                return [];
-            } catch (error) {
-                console.error('Error fetching logs:', error);
-                return [];
-            }
-        }
-
-        async function updateLogs() {
-            const logs = await fetchLogs();
+        // Auto-scroll logs
+        function simulateLogUpdates() {
             const logsContent = document.getElementById('logs-content');
-            if (!logsContent) return;
+            const messages = [
+                'Health check completed',
+                'Tool call: get_current_time',
+                'Tool call: search',
+                'Configuration validated',
+                'Server heartbeat received',
+                'Tool call: store memory',
+                'Tool call: retrieve memory'
+            ];
             
-            logsContent.innerHTML = '';
-            logs.forEach(log => {
+            setInterval(() => {
+                const timestamp = new Date().toLocaleTimeString('en-GB', {hour12: false}).substring(0, 8);
+                const message = messages[Math.floor(Math.random() * messages.length)];
+                
                 const logEntry = document.createElement('div');
                 logEntry.className = 'log-entry';
                 logEntry.innerHTML = `
-                    <span class="log-timestamp">${log.timestamp}</span>
-                    <span class="log-level ${log.level.toLowerCase()}">${log.level}</span>
-                    <span>${log.message}</span>
+                    <span class="log-timestamp">${timestamp}</span>
+                    <span class="log-level info">INFO</span>
+                    <span>${message}</span>
                 `;
+                
                 logsContent.appendChild(logEntry);
-            });
-            
-            logsContent.scrollTop = logsContent.scrollHeight;
-        }
-
-        // Real config management
-        async function loadConfigContent() {
-            try {
-                const response = await fetch('/_meta/config/content');
-                const data = await response.json();
-                if (data.ok) {
-                    const editor = document.getElementById('server-config-editor');
-                    if (editor) {
-                        editor.value = data.content;
-                    }
-                } else {
-                    console.error('Failed to load config:', data);
+                
+                // Keep only last 50 entries
+                const entries = logsContent.querySelectorAll('.log-entry');
+                if (entries.length > 50) {
+                    entries[0].remove();
                 }
-            } catch (error) {
-                console.error('Error loading config:', error);
-            }
+                
+                logsContent.scrollTop = logsContent.scrollHeight;
+            }, 4000);
         }
 
-        async function saveConfigContent() {
-            const editor = document.getElementById('server-config-editor');
-            if (!editor) return;
-            
-            try {
-                const response = await fetch('/_meta/config/save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: editor.value })
-                });
-                const data = await response.json();
-                if (data.ok) {
-                    console.log('Config saved successfully');
-                    await updateServerStates();
-                } else {
-                    console.error('Failed to save config:', data);
-                }
-            } catch (error) {
-                console.error('Error saving config:', error);
-            }
-        }
-
-        // Additional button functions
-        function validateConfig() {
-            const editor = document.getElementById('server-config-editor');
-            if (!editor) return;
-            
-            try {
-                JSON.parse(editor.value);
-                alert('Configuration is valid JSON');
-            } catch (e) {
-                alert('Invalid JSON: ' + e.message);
-            }
-    }
-
-        async function resetConfig() {
-            if (confirm('Reset configuration to last saved version?')) {
-                await loadConfigContent();
-            }
-        }
-
-        async function saveRequirements() {
-            const editor = document.querySelector('.config-editor[style*="min-height: 120px"]');
-            if (!editor) return;
-            
-            try {
-                const response = await fetch('/_meta/requirements/save', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content: editor.value })
-                });
-                const data = await response.json();
-                if (data.ok) {
-                    console.log('Requirements saved successfully');
-                } else {
-                    console.error('Failed to save requirements:', data);
-                }
-            } catch (error) {
-                console.error('Error saving requirements:', error);
-            }
-        }
-
-        function installDependencies() {
-            alert('Dependency installation would be triggered here (not implemented in backend)');
-        }
-
-        function clearLogs() {
-            const logsContent = document.getElementById('logs-content');
-            if (logsContent) {
-                logsContent.innerHTML = '';
-            }
-        }
-
-        async function restartAllServers() {
-            try {
-                const success = await reloadConfig();
-                if (success) {
-                    console.log('All servers restarted');
-                } else {
-                    console.error('Failed to restart servers');
-                }
-            } catch (error) {
-                console.error('Error restarting servers:', error);
-            }
-        }
-
-                // Load requirements content on init
-        async function loadRequirementsContent() {
-            try {
-                const response = await fetch('/_meta/requirements/content');
-                const data = await response.json();
-                if (data.ok) {
-                    const editor = document.querySelector('.config-editor[style*="min-height: 120px"]'); 
-                    if (editor) {
-                        editor.value = data.content;
-                    }
-                } else {
-                    console.error('Failed to load requirements:', data);
-                }
-            } catch (error) {
-                console.error('Error loading requirements:', error);
-            }
-        }
-
-        // Load external documentation content
-        async function loadDocumentationContent() {
-            const docPage = document.getElementById('documentation-page');
-            if (!docPage) return;
-            try {
-                const response = await fetch('/ui/docs/mcp-guide.html');
-                if (response.ok) {
-                    const content = await response.text();
-                    docPage.innerHTML = content.trim() ? content : '<p>Documentation not found.</p>';
-                } else {
-                    docPage.innerHTML = '<p>Failed to load documentation.</p>';
-                }
-            } catch (error) {
-                console.error('Error loading documentation:', error);
-                docPage.innerHTML = '<p>Error loading documentation.</p>';
-            }
-        }
-
-
-
-        // Polling for real-time updates
-        function startPolling() {
-            if (isPolling) return;
-            isPolling = true;
-            
-            // Update server states every 5 seconds
-            setInterval(async () => {
-                await updateServerStates();
-            }, 5000);
-            
-            // Update logs every 2 seconds
-            setInterval(async () => {
-                await updateLogs();
-            }, 2000);
-        }
-
-        // Page Navigation with Persistence
-        function showPage(pageId) {
-            // Hide all pages
-            document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
-            document.querySelectorAll('.nav-item').forEach(nav => nav.classList.remove('active'));
-            
-            // Show selected page
-            const page = document.getElementById(pageId);
-            const nav = document.querySelector(`[data-page="${pageId.replace('-page', '')}"]`);
-            
-            if (page) page.classList.add('active');
-            if (nav) nav.classList.add('active');
-            
-            // Save current page
-            localStorage.setItem('mcpo-current-page', pageId);
-        }
-        
-        function loadCurrentPage() {
-            const savedPage = localStorage.getItem('mcpo-current-page') || 'servers-page';
-            showPage(savedPage);
-        }
-        
-        // Update existing navigation clicks to use persistence
-        document.addEventListener('click', function(e) {
-            const navItem = e.target.closest('.nav-item[data-page]');
-            if (navItem) {
-                const pageId = navItem.getAttribute('data-page') + '-page';
-                showPage(pageId);
-            }
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            simulateLogUpdates();
+            updateStatusCounts();
+            updateThemeToggle();
         });
-
-                // Initialize with Persistence
-        document.addEventListener('DOMContentLoaded', async () => {
-            // Load persisted state first
-            loadTheme();
-            loadCurrentPage();
-
-            // Then load dynamic content
-            await updateServerStates();
-            await updateLogs();
-            await loadConfigContent();
-            await loadRequirementsContent();
-            await loadDocumentationContent();
-            startPolling();
-        });
-  </script>
-  <footer>mcpo minimal UI • <a href="https://github.com/open-webui/mcpo" target="_blank">GitHub</a></footer>
+    </script>
 </body>
 </html>
