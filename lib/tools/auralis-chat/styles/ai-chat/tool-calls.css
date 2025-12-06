@@ -1,0 +1,308 @@
+/* AI Chat Panel - Tool Call Logs and Execution Blocks */
+
+.ai-tool-call-log {
+    display: block;
+    width: 100%;
+    max-width: min(75%, 520px);
+    background: var(--color-panel-alt);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+    align-self: flex-start;
+    padding: 6px 0;
+}
+
+.ai-tool-call-log:empty {
+    display: none;
+}
+
+.ai-tool-call-log--inline {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    box-shadow: none;
+    max-width: 100%;
+    padding: 0;
+}
+
+.ai-assistant-activity {
+    width: 100%;
+    max-width: min(75%, 520px);
+    align-self: flex-start;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.ai-assistant-activity:empty {
+    display: none;
+}
+
+.ai-assistant-activity--has-message {
+    margin-top: -2px;
+}
+
+.ai-exec-block {
+    width: 100%;
+    background: var(--color-panel-alt);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-left: 3px solid var(--color-accent, var(--color-border));
+    border-radius: var(--radius-md);
+    padding: 10px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: none;
+}
+
+.ai-exec-block__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--color-text-muted);
+    text-transform: none;
+    letter-spacing: 0.01em;
+}
+
+.ai-exec-block__label {
+    color: var(--color-text);
+    font-weight: 600;
+}
+
+.ai-exec-block__time {
+    font-size: 11px;
+}
+
+.ai-exec-block__status {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--color-text);
+    background: rgba(255, 255, 255, 0.02);
+    border-radius: var(--radius-sm);
+    padding: 6px 8px;
+}
+
+.ai-exec-block[data-state="error"] .ai-exec-block__summary {
+    color: #cc3a3a;
+}
+
+.ai-exec-block__summary {
+    font-weight: 600;
+}
+
+.ai-exec-block__indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.ai-exec-block__dot {
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--color-accent);
+    opacity: 0.55;
+    animation: ai-exec-pulse 1.4s infinite ease-in-out;
+}
+
+.ai-exec-block__dot:nth-child(2) {
+    animation-delay: 0.2s;
+}
+
+.ai-exec-block__dot:nth-child(3) {
+    animation-delay: 0.4s;
+}
+
+.ai-exec-block[data-state="complete"] .ai-exec-block__indicator,
+.ai-exec-block[data-state="error"] .ai-exec-block__indicator {
+    display: none;
+}
+
+.ai-exec-block__attachments {
+    margin-top: 2px;
+}
+
+.ai-exec-block__log {
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    padding-top: 6px;
+}
+
+.ai-exec-block__log .ai-message__tools {
+    border-radius: var(--radius-sm);
+    border: none;
+    background: transparent;
+}
+
+.ai-exec-block__log .ai-message__tools-summary {
+    padding: 6px 0;
+    font-size: 12px;
+}
+
+.ai-exec-block__log .ai-message__tools-list {
+    padding: 6px 0 0;
+}
+
+.ai-exec-block__log .tool-call {
+    margin-bottom: 6px;
+    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    border-left-width: 3px;
+    box-shadow: none;
+}
+
+.ai-exec-block__log .tool-call:last-child {
+    margin-bottom: 0;
+}
+
+.ai-exec-block__log .tool-call__summary {
+    margin-bottom: 4px;
+    font-size: 11px;
+}
+
+.ai-exec-block__log .tool-call__status {
+    font-size: 11px;
+    width: 14px;
+    height: 14px;
+}
+
+.ai-exec-block__log .tool-call__duration {
+    font-size: 11px;
+}
+
+.tool-call {
+    background: var(--color-panel-alt);
+    border-left: 3px solid var(--color-accent, var(--color-border));
+    border-radius: var(--radius-md);
+    padding: 6px 8px;
+    margin-bottom: 6px;
+    font-family: 'IBM Plex Mono', 'Consolas', 'Courier New', monospace;
+    font-size: 11px;
+}
+
+.tool-call:last-child {
+    margin-bottom: 0;
+}
+
+.tool-call__summary {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    cursor: pointer;
+    margin-bottom: 0;
+    padding: 2px 0;
+    color: var(--color-text);
+    font-weight: 600;
+    font-size: 11px;
+}
+
+.tool-call__summary:hover {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.tool-call__summary::-webkit-details-marker {
+    display: none;
+}
+
+.tool-call__status {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    height: 16px;
+    font-size: 12px;
+}
+
+.tool-call__name {
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.tool-call__preview {
+    color: var(--color-text-muted);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.tool-call__duration {
+    margin-left: auto;
+    color: var(--color-text-muted);
+    font-size: 11px;
+}
+
+.tool-call__section {
+    margin: 8px 0 0;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: var(--radius-sm);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 8px;
+}
+
+.tool-call__section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 6px;
+}
+
+.tool-call__download {
+    font-size: 11px;
+    color: var(--color-link, var(--color-accent));
+    text-decoration: none;
+}
+
+.tool-call__download:hover {
+    text-decoration: underline;
+}
+
+.tool-call__code {
+    display: block;
+    margin: 0;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-all;
+    line-height: 1.4;
+    color: var(--color-text);
+}
+
+.tool-call--running {
+    border-left-color: #8b5cf6;
+}
+
+.tool-call--running .tool-call__status {
+    color: #8b5cf6;
+    animation: spin 1s linear infinite;
+}
+
+.tool-call--success {
+    border-left-color: #10b981;
+}
+
+.tool-call--success .tool-call__status {
+    color: #10b981;
+}
+
+.tool-call--error {
+    border-left-color: #ef4444;
+}
+
+.tool-call--error .tool-call__status {
+    color: #ef4444;
+}
+
+.tool-call__error {
+    margin-top: 8px;
+    padding: 8px;
+    border-radius: var(--radius-sm);
+    background: rgba(255, 59, 48, 0.12);
+    color: var(--color-error, #ef4444);
+    font-size: 12px;
+    line-height: 1.4;
+}
+

@@ -69,34 +69,25 @@ def main(
     hot_reload: Annotated[
         Optional[bool], typer.Option("--hot-reload", help="Enable hot reload for config file changes")
     ] = False,
-    tool_timeout: Annotated[
-        Optional[int], typer.Option("--tool-timeout", help="Per tool invocation timeout in seconds")
-    ] = 30,
-    tool_timeout_max: Annotated[
-        Optional[int], typer.Option("--tool-timeout-max", help="Hard upper bound for any effective tool timeout (seconds)")
-    ] = 600,
-    structured_output: Annotated[
-        Optional[bool], typer.Option("--structured-output", help="Return unified structured response object instead of raw list flattening")
-    ] = False,
-    read_only: Annotated[
-        Optional[bool], typer.Option("--read-only", help="Disable all mutating management endpoints (adds, reloads, enables, config writes)")
-    ] = False,
-    protocol_version_mode: Annotated[
-        Optional[str], typer.Option("--protocol-version-mode", help="MCP-Protocol-Version negotiation mode: off|warn|enforce")
-    ] = "warn",
-    validate_output_mode: Annotated[
-        Optional[str], typer.Option("--validate-output-mode", help="Tool output schema validation mode: off|warn|enforce")
-    ] = "off",
+    mcp_proxy_url: Annotated[
+        Optional[str], typer.Option("--mcp-proxy-url", help="MCP proxy base URL for log aggregation")
+    ] = None,
 ):
     server_command = None
     if not config_path:
         # Find the position of "--"
         if "--" not in sys.argv:
-            typer.echo("Usage: mcpo --host 0.0.0.0 --port 8000 -- your_mcp_command")
-            raise typer.Exit(1)
+            # Try default mcpp.json if present
+            default_cfg = os.path.join(os.getcwd(), "mcpp.json")
+            if os.path.exists(default_cfg):
+                config_path = default_cfg
+            else:
+                typer.echo("Usage: mcpo --host 0.0.0.0 --port 8000 -- your_mcp_command")
+                raise typer.Exit(1)
 
-        idx = sys.argv.index("--")
-        server_command: List[str] = sys.argv[idx + 1 :]
+        if "--" in sys.argv:
+            idx = sys.argv.index("--")
+            server_command: List[str] = sys.argv[idx + 1 :]
 
         if not server_command:
             typer.echo("Error: You must specify the MCP server command after '--'")
@@ -159,12 +150,7 @@ def main(
             path_prefix=path_prefix,
             headers=headers,
             hot_reload=hot_reload,
-            tool_timeout=tool_timeout,
-            tool_timeout_max=tool_timeout_max,
-            structured_output=structured_output,
-            read_only=read_only,
-            protocol_version_mode=protocol_version_mode,
-            validate_output_mode=validate_output_mode,
+            mcp_proxy_url=mcp_proxy_url,
         )
     )
 

@@ -1,0 +1,197 @@
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🌐 About OpenHubUI</h2>
+    </div>
+    <div class="card-content" style="padding: 16px; line-height: 1.6;">
+        <p style="font-size: 14px; color: var(--text-primary); margin-bottom: 16px;">
+            <strong>OpenHubUI</strong> is a comprehensive MCP (Model Context Protocol) management platform designed to solve the integration challenges that users face when adding MCP servers to OpenWebUI.
+        </p>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🎯 The Problem We Solve</h3>
+        <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin-bottom: 20px;">
+            <p style="font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.6;">
+                <strong>OpenWebUI recently added native MCP support, but only for HTTP Streamable servers.</strong> Most MCP servers in the ecosystem are stdio-based, leaving users frustrated and unable to access the tools they need. OpenHubUI bridges this gap by converting ANY MCP server (stdio, SSE, or HTTP Streamable) into a format that works seamlessly with OpenWebUI.
+            </p>
+        </div>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🏗️ Origins & Evolution</h3>
+        <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin-bottom: 20px;">
+            <p style="font-size: 12px; color: var(--text-secondary); margin: 0 0 12px 0; line-height: 1.6;">
+                OpenHubUI is based on the original <strong>MCPO</strong> project, but has evolved significantly. Most of the original codebase has been refactored, enhanced, and extended to meet the growing needs of the MCP ecosystem.
+            </p>
+            <p style="font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.6;">
+                The name "OpenHubUI" was chosen as a nod to the main application it serves, but <strong>does not reflect any official association or endorsement</strong> by the OpenWebUI developers and maintainers. This is an independent project created by the community, for the community.
+            </p>
+        </div>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🔧 How It Works</h3>
+        
+        <div style="margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Dual Server Architecture</div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.6;">
+                OpenHubUI runs two servers simultaneously:
+            </p>
+            <ul style="font-size: 12px; color: var(--text-secondary); margin: 0 0 12px 0; padding-left: 20px; line-height: 1.6;">
+                <li><strong>Port 8000 (Admin Server):</strong> Handles the management UI, direct MCP tool access via OpenAPI, and server configuration</li>
+                <li><strong>Port 8001 (Streamable Proxy):</strong> Converts MCP servers to HTTP Streamable format for OpenWebUI compatibility</li>
+            </ul>
+        </div>
+        
+        <div style="margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">MCP Protocol Conversion</div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.6;">
+                The system automatically converts between MCP protocol formats:
+            </p>
+            <ul style="font-size: 12px; color: var(--text-secondary); margin: 0 0 12px 0; padding-left: 20px; line-height: 1.6;">
+                <li><strong>stdio → HTTP Streamable:</strong> Launches stdio MCP servers as subprocesses and proxies their JSON-RPC over HTTP</li>
+                <li><strong>SSE → HTTP Streamable:</strong> Connects to remote SSE MCP servers and converts to HTTP Streamable</li>
+                <li><strong>HTTP Streamable:</strong> Passes through natively without conversion</li>
+            </ul>
+        </div>
+        
+        <div style="margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Configuration Management</div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.6;">
+                All MCP servers are defined in a single <code style="background: var(--bg-secondary); padding: 2px 4px; border-radius: 2px;">mcpo.json</code> file:
+            </p>
+            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">
+                {<br>
+                &nbsp;&nbsp;"mcpServers": {<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;"time": {<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"command": "uvx",<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"args": ["mcp-server-time"],<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+                &nbsp;&nbsp;}<br>
+                }
+            </div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.6;">
+                Changes are automatically detected and servers are reloaded without downtime.
+            </p>
+        </div>
+        
+        <div style="margin-bottom: 16px;">
+            <div style="font-size: 13px; font-weight: 600; margin-bottom: 8px; color: var(--text-primary);">Tool State Management</div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.6;">
+                Individual tool enable/disable states are tracked in <code style="background: var(--bg-secondary); padding: 2px 4px; border-radius: 2px;">mcpo_state.json</code>:
+            </p>
+            <div style="background: var(--bg-secondary); padding: 8px; border-radius: 4px; font-family: monospace; font-size: 11px; color: var(--text-secondary); margin-bottom: 8px;">
+                {<br>
+                &nbsp;&nbsp;"servers": {<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;"playwright": {<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"enabled": true,<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"tools": {<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"browser_navigate": true,<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"browser_snapshot": false<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;}<br>
+                &nbsp;&nbsp;&nbsp;&nbsp;}<br>
+                &nbsp;&nbsp;}<br>
+                }
+            </div>
+            <p style="font-size: 12px; color: var(--text-secondary); margin: 0; line-height: 1.6;">
+                This allows fine-grained control over which tools are available to OpenWebUI.
+            </p>
+        </div>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🤖 Self-Management APIs</h3>
+        <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 12px; line-height: 1.6;">
+            OpenHubUI provides REST APIs that allow AI models to manage their own MCP servers programmatically:
+        </p>
+        
+        <div style="margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">Configuration Management</div>
+            <div style="background: var(--bg-secondary); padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; color: var(--text-secondary);">
+                GET /_meta/config/content - Get current config<br>
+                POST /_meta/config/save - Update config & reload<br>
+                POST /_meta/reload - Reload all servers
+            </div>
+        </div>
+        
+        <div style="margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">Dependency Management</div>
+            <div style="background: var(--bg-secondary); padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; color: var(--text-secondary);">
+                GET /_meta/requirements/content - Get requirements.txt<br>
+                POST /_meta/requirements/save - Update & install deps
+            </div>
+        </div>
+        
+        <div style="margin-bottom: 12px;">
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px; color: var(--text-primary);">Server Control</div>
+            <div style="background: var(--bg-secondary); padding: 6px; border-radius: 4px; font-family: monospace; font-size: 11px; color: var(--text-secondary);">
+                GET /_meta/servers - List all servers<br>
+                POST /_meta/servers/{name}/enable - Enable server<br>
+                POST /_meta/servers/{name}/tools/{tool}/enable - Enable tool
+            </div>
+        </div>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🏗️ Technical Architecture</h3>
+        <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; margin-bottom: 20px;">
+            <pre style="font-family: monospace; font-size: 11px; color: var(--text-secondary); white-space: pre; overflow-x: auto; margin: 0;">┌──────────────────────────────────┐
+│      OpenWebUI (Frontend)        │
+└──────────┬───────────────────────┘
+           │ HTTP Streamable MCP
+           ↓
+┌──────────────────────────────────┐
+│    OpenHubUI (This Platform)     │
+├──────────────────────────────────┤
+│ Port 8000: Admin + Management    │
+│  ├── Visual UI Dashboard         │
+│  ├── MCP Server Configuration    │
+│  ├── Tool Filtering & Control    │
+│  └── Self-Management APIs        │
+│                                  │
+│ Port 8001: Streamable Proxy      │
+│  └── OpenWebUI-Compatible Stream │
+└──────────────────────────────────┘
+           │
+           ↓
+┌──────────────────────────────────┐
+│    MCP Servers (Any Type)        │
+│  ├── stdio servers (converted)   │
+│  ├── SSE servers (converted)     │
+│  ├── HTTP Streamable (native)    │
+│  └── Custom/Remote servers       │
+└──────────────────────────────────┘</pre>
+        </div>
+        
+        <h3 style="font-size: 16px; font-weight: 600; margin: 20px 0 12px; color: var(--text-primary);">🔗 Access Points</h3>
+        <div style="background: var(--bg-secondary); padding: 12px; border-radius: 6px; font-family: monospace; font-size: 12px; color: var(--text-secondary);">
+            <div style="margin-bottom: 8px;"><strong style="color: var(--text-primary);">Admin UI:</strong> <a href="/ui" style="color: var(--text-link);">http://localhost:8000/ui</a></div>
+            <div style="margin-bottom: 8px;"><strong style="color: var(--text-primary);">API Docs:</strong> <a href="/docs" target="_blank" style="color: var(--text-link);">http://localhost:8000/docs</a></div>
+            <div style="margin-bottom: 8px;"><strong style="color: var(--text-primary);">Server Docs:</strong> http://localhost:8000/{server-name}/docs</div>
+            <div style="margin-bottom: 8px;"><strong style="color: var(--text-primary);">OpenWebUI (All Servers):</strong> http://localhost:8001</div>
+            <div><strong style="color: var(--text-primary);">OpenWebUI (Per Server):</strong> http://localhost:8001/{server-name}</div>
+        </div>
+        
+        <div style="margin-top: 16px; padding: 12px; background: #fff3cd; border-radius: 6px; border: 1px solid #ffeaa7;">
+            <div style="font-size: 12px; font-weight: 600; margin-bottom: 4px; color: #856404;">⚠️ Security Notice</div>
+            <div style="font-size: 11px; color: #856404; line-height: 1.5;">
+                OpenHubUI executes commands specified in your configuration. Always protect your config files, run with least privilege, use strong API keys, and never expose ports publicly without authentication.
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <div class="card-header">
+        <h2 class="card-title">🙏 Credits & License</h2>
+    </div>
+    <div class="card-content" style="padding: 16px;">
+        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 12px;">
+            Built on the <a href="https://modelcontextprotocol.io/" target="_blank" style="color: var(--text-link);">Model Context Protocol (MCP)</a> by Anthropic.
+        </p>
+        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.6; margin-bottom: 12px;">
+            Based on the original <a href="https://github.com/open-webui/mcpo" target="_blank" style="color: var(--text-link);">MCPO project</a>, significantly evolved and enhanced.
+        </p>
+        <p style="font-size: 12px; color: var(--text-secondary); line-height: 1.6;">
+            <strong>Version:</strong> <span id="about-version">—</span> • 
+            <strong>License:</strong> MIT • 
+            <a href="https://github.com/open-webui/mcpo" target="_blank" style="color: var(--text-link);">GitHub Repository</a>
+        </p>
+        <div style="margin-top: 12px; padding: 8px; background: var(--bg-secondary); border-radius: 4px;">
+            <p style="font-size: 11px; color: var(--text-secondary); margin: 0; line-height: 1.4;">
+                <strong>Disclaimer:</strong> OpenHubUI is an independent community project. The name is chosen as a nod to OpenWebUI but does not represent any official association, endorsement, or shared views with the OpenWebUI development team or maintainers.
+            </p>
+        </div>
+    </div>
+</div>

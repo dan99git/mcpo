@@ -4,14 +4,8 @@ import logging
 import time
 from pathlib import Path
 from typing import Callable, Optional, Dict, Any
-try:
-    from watchdog.observers import Observer
-    from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileMovedEvent, FileCreatedEvent
-except ImportError:  # pragma: no cover
-    Observer = None  # type: ignore
-    class FileSystemEventHandler:  # type: ignore
-        pass
-    FileModifiedEvent = FileMovedEvent = FileCreatedEvent = object  # type: ignore
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileMovedEvent, FileCreatedEvent
 import threading
 
 
@@ -124,9 +118,9 @@ class ConfigWatcher:
     def __init__(self, config_path: str, reload_callback: Callable[[Dict[str, Any]], None]):
         self.config_path = Path(config_path).resolve()
         self.reload_callback = reload_callback
-        self.observer = None  # type: ignore[assignment]
-        self.handler = None
-        self.loop = None
+        self.observer: Optional[Observer] = None
+        self.handler: Optional[ConfigChangeHandler] = None
+        self.loop: Optional[asyncio.AbstractEventLoop] = None
 
     def start(self):
         """Start watching the config file."""
@@ -142,9 +136,6 @@ class ConfigWatcher:
             return
 
         self.handler = ConfigChangeHandler(self.config_path, self.reload_callback, self.loop)
-        if Observer is None:
-            logger.error("watchdog is not installed; config hot-reload disabled")
-            return
         self.observer = Observer()
 
         # Watch the directory containing the config file

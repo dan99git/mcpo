@@ -1,0 +1,15 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "run mcpo server",
+			"type": "shell",
+			"command": "powershell -Command \"$env:PYTHONPATH='D:/mcpo/src'; D:/mcpo/.venv/Scripts/python.exe -m mcpo serve --config D:/mcpo/mcpo.json --host 127.0.0.1 --port 8000 --hot-reload --env-path D:/.env\"",
+			"isBackground": false,
+			"problemMatcher": [
+				"$tsc"
+			],
+			"group": "build"
+		}
+	]
+}

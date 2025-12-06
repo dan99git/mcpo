@@ -2,12 +2,52 @@
 
 ## Unreleased (feat/phase1-baseline)
 
+### Architecture Consolidation (January 2025)
+- 🏗️ **Unified Port Architecture**: Consolidated all services to optimize performance on M4 Mini Pro hardware
+  - **Port 8000**: MCPO unified server (admin + transcription + UI)
+  - **Port 8001**: MCPP proxy (MCP streamable-http, unchanged)
+  - **Port 2638**: External Whisper server (batch STT, unchanged)
+- 🚀 **Real-time Transcription Integration**: Added comprehensive transcription features on main port
+  - WebSocket endpoint: `/_transcribe/ws` for bi-directional audio streaming
+  - Admin endpoints: `/_transcribe/admin/endpoints` for per-user token management
+  - Health monitoring: `/_transcribe/health` proxying upstream Whisper server status
+  - Feature-gated by `TRANSCRIBE_FEATURE_ENABLED=true` environment variable
+- 🎨 **Enhanced UI Components**: New "Realtime TX" page with playground, endpoint management, and monitoring
+  - Test playground with WebSocket controls and audio transcription output
+  - Per-user endpoint/token generation and management table
+  - Real-time connection status and upstream health monitoring
+  - Integrated logs tab for transcription activity tracking
+- 📈 **Performance Optimization**: Leveraged M4 Mini Pro capabilities (64GB unified memory + 16-core GPU)
+  - Single-port architecture eliminates CORS complexity and auth fragmentation
+  - Reduced network latency and simplified deployment model
+  - Optimized for 100+ concurrent transcription sessions with local ML inference
+- 🔧 **Simplified Deployment**: Updated `start.bat` to reflect unified architecture
+  - Removed redundant 8003 transcription proxy
+  - Consolidated environment variable configuration
+  - Streamlined two-process deployment (8000 + 8001)
+
 ### Recovery Notes (August 2025)
 - ✅ **Complete System Recovery**: Successfully recovered from git revert data loss incident
 - 🔍 **Forensic Analysis**: Identified and preserved latest UI version (1577 lines) and evolved backend (1778 lines) 
 - 🧹 **Workspace Cleanup**: Organized recovery materials and removed failed modular upgrade remnants
 - ✅ **Full Verification**: 49/49 test suite passing, all MCP server connections operational
 - 🚀 **Production Ready**: System fully restored and verified working with all 4 MCP servers (Management, Perplexity, Time, Playwright)
+
+### Critical Bug Fixes (January 2025)
+- 🔧 **State Persistence Recovery**: Fixed circular import issue preventing state loading on startup
+  - Moved state loading to occur after service initialization
+  - Added proper error handling and graceful fallbacks
+  - Integrated state saving into lifespan cleanup for persistence across restarts
+- 🔗 **Complete OpenAPI Aggregation Implementation**: Fully implemented missing `/_meta/aggregate_openapi` endpoint
+  - Smart caching with automatic invalidation triggers
+  - Schema collision detection and resolution with server-prefix naming
+  - Real-time filtering based on server and tool enable/disable states
+  - Integrated cache invalidation on reload, server enable/disable, and tool enable/disable operations
+  - Production-ready for external integrations (Open WebUI, SDK generators, API documentation)
+- 🛠️ **Backend Production Readiness**: All critical functionality now operational and tested
+  - Thread-safe service architecture fully functional
+  - Robust error handling and logging implemented
+  - Ready for frontend deployment with full backend support
 
 ### Added
 - 🎛️ **Real-time Log Monitoring & UI Management**: Complete management interface at `/ui` with live server logs, configuration editing, and comprehensive tool visibility
@@ -48,6 +88,16 @@
 - Open config action (vscode:// deep link) from UI
 - `--read-only` flag to disable all mutating management endpoints for safer embedding/distribution
 - Versioned, atomic state persistence for server/tool enable flags (`*_state.json` with temp-file replace)
+- 🔗 **Aggregated OpenAPI Specification**: New `/_meta/aggregate_openapi` endpoint that provides a unified OpenAPI 3.1 spec combining all enabled MCP servers
+  - Smart caching with automatic invalidation when servers/tools are modified
+  - Schema collision detection and resolution with server-prefix naming
+  - Reference path rewriting for proper component linking
+  - Real-time filtering based on server and tool enable/disable states
+  - Optimized for integration with external tools like Open WebUI, SDK generators, and API documentation
+- 🧪 **Live HTTP Integration Tests**: Added `test_real_tool_execution.py` exercising real server endpoints (no in-process shutdown) including success, error, timeout, and validation cases.
+- 🧪 **Protocol Version Header Test Suite**: Added `test_protocol_version_header.py` covering presence/absence of `MCP-Protocol-Version` header and log warning capture.
+- 🔐 **Hardening (Phase 1 Security Fixes)**: Session health checks, atomic file writes, path traversal prevention, package name validation, JSON size limits, thread-safe log buffering.
+- 🔀 **Namespaced Tool Routing Pattern**: Standardized `/server/tool` path usage (e.g. `/time/get_current_time`) and aligned tests.
 
 ### Changed
 - Correct README Python version to 3.11+
@@ -57,6 +107,11 @@
 ### Planned / Pending
 - Expanded structured output (streaming, richer resource metadata)
 - Additional tests for image/resource items & timeout behavior
+- 🏷️ **Enhanced OpenAPI Tagging**: Improved server-based tagging for better UI organization
+- 🧪 **Extended Aggregation Test Coverage**: Enhanced test coverage for edge cases and complex scenarios
+- 🤐 **Protocol Warn Optimization**: Auto-suppress benign missing-header warnings when internally injected
+- 🔄 **Optional Root Proxy Shortcuts**: Flat proxy routes (e.g. `/get_current_time`) if required by downstream clients
+- 🎨 **Frontend Modularization**: Break up monolithic UI files into maintainable components
 
 ---
 Historical entries are maintained upstream; this fork annotates divergence points below.

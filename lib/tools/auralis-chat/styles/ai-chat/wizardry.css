@@ -1,0 +1,217 @@
+/* Wizardry CSS - Premium Agentic UI Overrides */
+
+/* Glassmorphism & Modern Cards */
+.ai-message,
+.activity-card,
+.thought-card,
+.ai-tool-call-log {
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Enhanced Assistant Message */
+.ai-message--assistant {
+    background: rgba(43, 47, 51, 0.6);
+    /* Semi-transparent dark */
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    color: #e1e1e3;
+}
+
+/* Enhanced User Message */
+.ai-message--user {
+    background: linear-gradient(135deg, #0a84ff, #007aff);
+    box-shadow: 0 4px 12px rgba(10, 132, 255, 0.3);
+    border: none;
+}
+
+/* Tool Cards - The "Cursor" Look */
+.activity-card {
+    background: rgba(30, 30, 34, 0.6);
+    border-radius: 10px;
+    border-left-width: 4px;
+    transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+.activity-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    transform: translateY(-1px);
+    box-shadow: 0 6px 16px rgba(0, 0, 0, 0.25);
+}
+
+/* Running State - Shimmer Effect */
+@keyframes shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.ai-stream__item[data-status="running"] .activity-card {
+    background: linear-gradient(90deg,
+            rgba(30, 30, 34, 0.6) 25%,
+            rgba(139, 92, 246, 0.1) 50%,
+            rgba(30, 30, 34, 0.6) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 3s infinite linear;
+    border-left-color: #8b5cf6;
+    border-color: rgba(139, 92, 246, 0.3);
+}
+
+/* Success State - Glow */
+.ai-stream__item[data-status="success"] .activity-card {
+    border-left-color: #10b981;
+    box-shadow: 0 0 15px rgba(16, 185, 129, 0.1);
+}
+
+/* Error State - Glow */
+.ai-stream__item[data-status="error"] .activity-card {
+    border-left-color: #ef4444;
+    box-shadow: 0 0 15px rgba(239, 68, 68, 0.1);
+}
+
+/* Thinking Block - Matrix-like Pulse */
+.thought-card {
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 16px;
+    padding: 12px 16px;
+}
+
+.thought-card__icon {
+    color: var(--color-accent);
+    font-size: 14px;
+}
+
+/* Input Area Polish */
+.ai-chat__input-shell {
+    background: transparent;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+
+.ai-chat__input-wrapper {
+    background: rgba(0, 0, 0, 0.32);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0;
+    transition: border-color 0.2s ease;
+    padding: 5px 5px;
+}
+
+.ai-chat__input-wrapper:focus-within {
+    border-color: rgba(255, 255, 255, 0.15);
+    box-shadow: none;
+}
+
+.ai-chat__input {
+    color: #fff;
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+/* Context Chips (New Feature) */
+.ai-context-chips {
+    display: flex;
+    gap: 8px;
+    padding: 0 0 8px 0;
+    /* Reduced bottom padding */
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.ai-context-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    font-size: 11px;
+    color: var(--color-text-muted);
+    white-space: nowrap;
+    transition: all 0.2s ease;
+}
+
+.ai-context-chip:hover {
+    background: rgba(255, 255, 255, 0.1);
+    border-color: rgba(255, 255, 255, 0.2);
+    color: var(--color-text);
+}
+
+.ai-context-chip--active {
+    background: rgba(59, 130, 246, 0.15);
+    border-color: rgba(59, 130, 246, 0.3);
+    color: #60a5fa;
+}
+
+.ai-chat__tool-status .ai-context-chip {
+    background: rgba(10, 132, 255, 0.18);
+    border: 1px solid rgba(10, 132, 255, 0.35);
+    color: #b3d7ff;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(10, 132, 255, 0.2);
+}
+
+.ai-context-chip__icon {
+    /* SVGs are sized via attributes, but we can enforce here if needed */
+    display: block;
+}
+
+/* Enhanced Code Blocks */
+.code-block-wrapper {
+    margin: 12px 0;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(0, 0, 0, 0.3);
+    overflow: hidden;
+}
+
+.code-block-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 12px;
+    background: rgba(255, 255, 255, 0.05);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--color-text-muted);
+}
+
+.code-block-lang {
+    text-transform: uppercase;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+}
+
+.code-block-copy {
+    background: transparent;
+    border: none;
+    color: var(--color-text-muted);
+    cursor: pointer;
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.2s ease;
+}
+
+.code-block-copy:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: var(--color-text);
+}
+
+/* Override default pre styles */
+.ai-message__content pre.code-block {
+    margin: 0;
+    padding: 16px;
+    background: transparent;
+    border-radius: 0;
+    border: none;
+}

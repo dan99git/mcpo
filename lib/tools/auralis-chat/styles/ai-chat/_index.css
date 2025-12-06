@@ -1,0 +1,35 @@
+/* AI Chat Panel Styles - Modular Structure */
+/* Import all component modules */
+
+@import './input.css';
+@import './popups.css';
+@import './tools.css';
+@import './stream.css';
+@import './messages.css';
+@import './tool-calls.css';
+@import './animations.css';
+@import './status.css';
+@import './wizardry.css';
+
+/* Main container styles */
+.ai-chat {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 10px;
+    border: 1px solid #2B2F33;
+    border-radius: 0;
+    background: #2B2F33;
+}
+
+.workspace__panel-right .ai-chat {
+    border-left: none;
+}
+
+.ai-chat__input-area {
+    border-top: none;
+    padding-top: 0;
+    position: relative;
+    overflow: visible;
+    z-index: 10;
+}

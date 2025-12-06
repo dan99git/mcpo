@@ -1,0 +1,232 @@
+/* MCPO Configuration Page Styles */
+
+/* Config Page */
+.config-section {
+    margin-bottom: 24px;
+}
+
+.section-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 4px;
+}
+
+.section-description {
+    color: var(--text-secondary);
+    font-size: 12px;
+    margin-bottom: 12px;
+}
+
+.config-editor {
+    width: 100%;
+    min-height: 220px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px;
+    font-family: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', Consolas, 'Courier New', monospace;
+    font-size: 11px;
+    color: var(--text-primary);
+    resize: vertical;
+    outline: none;
+    line-height: 1.4;
+}
+
+/* Larger initial height specifically for the main JSON config editor */
+.config-editor.json-editor {
+    min-height: 420px;
+}
+
+.config-actions {
+    margin-top: 12px;
+    display: flex;
+    gap: 8px;
+}
+
+.client-config .client-config-actions {
+    margin: 0 0 8px 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.client-config-output {
+    min-height: 320px;
+    resize: vertical;
+    background: var(--bg-primary);
+    border-color: var(--border);
+}
+
+.client-config-status {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    min-height: 14px;
+}
+
+.client-config-status.status-success {
+    color: #15803d;
+}
+
+[data-theme="dark"] .client-config-status.status-success {
+    color: #7dd87d;
+}
+
+.client-config-status.status-warning {
+    color: #b7791f;
+}
+
+[data-theme="dark"] .client-config-status.status-warning {
+    color: #fbbf24;
+}
+
+.client-config-status.status-error {
+    color: #dc2626;
+}
+
+[data-theme="dark"] .client-config-status.status-error {
+    color: #f87171;
+}
+
+/* Add Server Form */
+.add-server-form {
+    display: none;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-top: 12px;
+}
+
+.add-server-form.active {
+    display: block;
+}
+
+.form-group {
+    margin-bottom: 12px;
+}
+
+.form-label {
+    display: block;
+    margin-bottom: 4px;
+    font-weight: 500;
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.form-input {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--text-primary);
+}
+
+.form-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+}
+
+/* Config Grid for TX Page */
+.config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.config-grid label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.config-grid input,
+.config-grid select {
+    padding: 8px 10px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.config-grid input:focus,
+.config-grid select:focus {
+    outline: none;
+    border-color: var(--text-primary);
+}
+
+.config-grid .checkbox {
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+}
+
+.config-grid .checkbox input[type="checkbox"] {
+    width: auto;
+    margin: 0;
+}
+
+/* Controls Row */
+.controls-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+}
+
+.controls-row .advanced {
+    margin-left: auto;
+}
+
+.controls-row .advanced summary {
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.controls-row .advanced[open] summary {
+    margin-bottom: 8px;
+}
+
+/* Table Styling for TX Endpoints */
+.table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.table th,
+.table td {
+    padding: 8px 12px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+.table th {
+    background: var(--bg-secondary);
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.table td {
+    color: var(--text-secondary);
+}
+
+.table tbody tr:hover {
+    background: var(--hover);
+}

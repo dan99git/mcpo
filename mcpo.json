@@ -1,0 +1,39 @@
+{
+  "mcpServers": {
+    "chrome-devtools": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"]
+    },
+    "memory": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-memory"]
+    },
+    "perplexity": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "perplexity-mcp"],
+      "env": {
+        "PERPLEXITY_API_KEY": "${PERPLEXITY_API_KEY}"
+      },
+      "autoApprove": ["search", "reason", "deep_research"]
+    },
+    "playwright": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"]
+    },
+    "time": {
+      "enabled": true,
+      "command": "uvx",
+      "args": ["mcp-server-time"]
+    },
+    "echo-server": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-everything"],
+      "autoApprove": ["echo"]
+    }
+  }
+}

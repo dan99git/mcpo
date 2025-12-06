@@ -6,13 +6,17 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
 from datetime import datetime, timezone
 
+import httpx
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Body, Query
+from pydantic import BaseModel
+from typing import Any as _Any
 from fastapi.responses import JSONResponse
 from fastapi.requests import Request
 from fastapi.exceptions import RequestValidationError
@@ -31,7 +35,14 @@ from mcpo.utils.main import (
     get_tool_handler,
     normalize_server_type,
 )
+from mcpo.utils.config import interpolate_env_placeholders_in_config
 from mcpo.utils.config_watcher import ConfigWatcher
+from mcpo.services.state import get_state_manager
+from mcpo.services.logging import get_log_manager
+from mcpo.services.logging_handlers import BufferedLogHandler
+from mcpo.api.routers.admin import _mount_or_remount_fastmcp, router as admin_router
+from mcpo.api.routers.chat import router as chat_router
+from mcpo.api.routers.completions import router as completions_router
 
 # MCP protocol version (used for outbound remote connections headers)
 MCP_VERSION = "2025-06-18"
@@ -48,53 +59,7 @@ def error_envelope(message: str, code: str | None = None, data: Any | None = Non
     return payload
 
 
-STATE_FILE_VERSION = 1
-
-def _empty_state() -> Dict[str, Any]:
-    return {"version": STATE_FILE_VERSION, "server_enabled": {}, "tool_enabled": {}}
-
-def load_state_file(config_path: str = None) -> Dict[str, Any]:
-    """Load persisted server/tool enabled states from <config>_state.json with version tolerance."""
-    if not config_path:
-        return _empty_state()
-    state_path = config_path.replace('.json', '') + '_state.json'
-    if not os.path.exists(state_path):
-        return _empty_state()
-    try:
-        with open(state_path, 'r') as f:
-            state_data = json.load(f)
-        # Basic forward compatibility: ignore if version missing or higher
-        if isinstance(state_data, dict):
-            server_enabled = state_data.get("server_enabled", {}) or {}
-            tool_enabled = state_data.get("tool_enabled", {}) or {}
-            return {"version": state_data.get("version", 0), "server_enabled": server_enabled, "tool_enabled": tool_enabled}
-        return _empty_state()
-    except (json.JSONDecodeError, OSError) as e:  # pragma: no cover - defensive
-        logger.warning(f"Failed to load state file {state_path}: {e}")
-        return _empty_state()
-
-def save_state_file(config_path: str, server_enabled: Dict[str, bool], tool_enabled: Dict[str, Dict[str, bool]]):
-    """Atomically save server/tool enabled states with version marker.
-
-    We write to a temporary file and rename to avoid partial writes on crash.
-    """
-    if not config_path:
-        return
-    state_path = config_path.replace('.json', '') + '_state.json'
-    tmp_path = state_path + '.tmp'
-    state_data = {
-        "version": STATE_FILE_VERSION,
-        "server_enabled": server_enabled,
-        "tool_enabled": tool_enabled,
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-    }
-    try:
-        with open(tmp_path, 'w') as f:
-            json.dump(state_data, f, indent=2)
-        os.replace(tmp_path, state_path)  # atomic on most platforms
-        logger.debug(f"State saved to {state_path}")
-    except OSError as e:  # pragma: no cover - defensive
-        logger.warning(f"Failed to save state file {state_path}: {e}")
+# State management now uses StateManager singleton - see services/state.py
 
 # Global reload lock to ensure atomic config reloads
 _reload_lock = asyncio.Lock()
@@ -106,33 +71,10 @@ _health_state: Dict[str, Any] = {
     "servers": {},  # name -> {connected: bool, type: str}
 }
 
-# Global log buffer for UI display
-_log_buffer = []
-_log_buffer_lock = asyncio.Lock()
-MAX_LOG_ENTRIES = 100
-
-class LogBufferHandler(logging.Handler):
-    """Custom log handler to capture logs for UI display"""
-    def emit(self, record):
-        if record.levelno >= logging.INFO:  # Only INFO and above
-            log_entry = {
-                "timestamp": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
-                "level": record.levelname,
-                "message": record.getMessage()
-            }
-            # Only use asyncio if there's a running event loop
-            try:
-                loop = asyncio.get_running_loop()
-                asyncio.create_task(self._add_to_buffer(log_entry))
-            except RuntimeError:
-                # No event loop running, add synchronously for tests
-                asyncio.run(self._add_to_buffer(log_entry))
-    
-    async def _add_to_buffer(self, entry):
-        async with _log_buffer_lock:
-            _log_buffer.append(entry)
-            if len(_log_buffer) > MAX_LOG_ENTRIES:
-                _log_buffer.pop(0)
+# Global log buffer for UI display (mirrors centralized log manager)
+_log_buffer: list[dict] = []
+_log_buffer_lock = threading.Lock()
+MAX_LOG_ENTRIES = 2000
 
 
 def _update_health_snapshot(app: FastAPI):
@@ -205,6 +147,9 @@ def load_config(config_path: str) -> Dict[str, Any]:
     try:
         with open(config_path, "r") as f:
             config_data = json.load(f)
+
+        # Expand any ${VAR} placeholders from the current environment before validation
+        config_data = interpolate_env_placeholders_in_config(config_data)
 
         mcp_servers = config_data.get("mcpServers", {})
         if "mcpServers" not in config_data:
@@ -281,6 +226,8 @@ def create_sub_app(server_name: str, server_cfg: Dict[str, Any], cors_allow_orig
 
     sub_app.state.api_dependency = api_dependency
     sub_app.state.connection_timeout = connection_timeout
+    # Keep a stable config key for operation_id generation and discovery
+    sub_app.state.config_key = server_name
 
     return sub_app
 
@@ -338,6 +285,7 @@ async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, An
             connection_timeout = getattr(main_app.state, 'connection_timeout', None)
             lifespan = getattr(main_app.state, 'lifespan', None)
             path_prefix = getattr(main_app.state, 'path_prefix', "/")
+            state_manager = get_state_manager()
 
             if servers_to_remove:
                 logger.info(f"Removing servers: {list(servers_to_remove)}")
@@ -366,12 +314,24 @@ async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, An
                         )
                         sub_app.state.parent_app = main_app
                         main_app.mount(f"{path_prefix}{server_name}", sub_app)
+                        # Ensure state manager tracks the server so UI reflects it immediately
+                        try:
+                            current_state = state_manager.get_server_state(server_name)
+                            state_manager.set_server_enabled(server_name, current_state.get("enabled", True))
+                        except Exception as state_err:  # pragma: no cover - defensive
+                            logger.warning(f"Failed to persist state for server '{server_name}': {state_err}")
+
                         # Initialize newly mounted sub-app (establish MCP session + register tool endpoints)
                         try:
                             await initialize_sub_app(sub_app)
+                            sub_app.state.last_error = None
                         except Exception as init_err:  # pragma: no cover - defensive
-                            logger.error(f"Failed to initialize server '{server_name}': {init_err}")
-                            raise
+                            sub_app.state.is_connected = False
+                            sub_app.state.last_error = str(init_err)
+                            logger.error(
+                                f"Failed to initialize server '{server_name}': {init_err}. "
+                                "Server remains mounted but marked disconnected."
+                            )
                     except Exception as e:
                         logger.error(f"Failed to create server '{server_name}': {e}")
                         main_app.router.routes = backup_routes
@@ -465,6 +425,9 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
     tools_result = await session.list_tools()
     tools = tools_result.tools
 
+    # Prefer config key from state to ensure uniqueness across servers
+    server_key = getattr(app.state, "config_key", None) or (app.title or "server").replace(" ", "_")
+
     for tool in tools:
         endpoint_name = tool.name
         endpoint_description = tool.description
@@ -500,6 +463,7 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
             summary=endpoint_name.replace("_", " ").title(),
             description=endpoint_description,
             response_model_exclude_none=True,
+            operation_id=f"{server_key}.{endpoint_name}",
             dependencies=[Depends(api_dependency)] if api_dependency else [],
         )(tool_handler)
 
@@ -642,65 +606,154 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         version="1.0",
         servers=[{"url": "/mcpo"}]
     )
+    # Request models for clear OpenAPI requestBody schemas
+    class PostConfigBody(BaseModel):
+        config: _Any
+
+    class PostEnvBody(BaseModel):
+        env_vars: Dict[str, _Any]
+
+    class PostRequirementsBody(BaseModel):
+        content: str
+
+    class InstallPythonPackageBody(BaseModel):
+        package_name: str
+
     
     # Store reference to main app for accessing state
     mcpo_app.state.main_app = main_app
-    
-    @mcpo_app.post("/install_python_package", 
-                   summary="Install Python Package",
-                   description="Dynamically install Python packages via pip")
-    async def install_python_package(request: Request, form_data: Dict[str, Any]):
+
+    @mcpo_app.post(
+        "/install_python_package",
+        summary="Install Python Package",
+        description=(
+            "Install exactly one named package. \n\n"
+            "Rules:\n"
+            "- Single package only; no bulk installs.\n"
+            "- Do not add upgrade flags (e.g., -U/--upgrade) unless explicitly requested.\n"
+            "- Do not install extras or transitive tools beyond what is requested.\n"
+            "- If installation fails, report the error and stop. Do not retry with guesses."
+        ),
+        operation_id="mcpo.install_python_package",
+        openapi_extra={
+            "x-instructions": [
+                "Install only the provided package_name.",
+                "No upgrades or version changes unless explicitly specified by the user.",
+                "No additional flags or extras.",
+                "On error, return the error; do not attempt speculative fixes."
+            ]
+        },
+    )
+    async def install_python_package(request: Request, body: InstallPythonPackageBody):
         """Install a Python package using pip."""
         try:
-            package_name = form_data.get("package_name")
-            if not package_name:
+            package_name = body.package_name if body else None
+            if not package_name or not isinstance(package_name, str):
                 logger.warning("install_python_package: Missing package_name parameter")
                 return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing package_name"}})
-            
+
             logger.info(f"install_python_package: Starting installation of package '{package_name}'")
-            
+
             # Run pip install
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", package_name],
-                capture_output=True, text=True, timeout=120
+                capture_output=True,
+                text=True,
+                timeout=120,
             )
-            
+
             if result.returncode == 0:
                 logger.info(f"install_python_package: Successfully installed package '{package_name}'")
                 return {"ok": True, "message": f"Successfully installed {package_name}", "output": result.stdout}
             else:
-                logger.error(f"install_python_package: Failed to install package '{package_name}' - {result.stderr}")
-                return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to install {package_name}", "details": result.stderr}})
-                
+                logger.error(
+                    f"install_python_package: Failed to install package '{package_name}' - {result.stderr}"
+                )
+                return JSONResponse(
+                    status_code=500,
+                    content={
+                        "ok": False,
+                        "error": {
+                            "message": f"Failed to install {package_name}",
+                            "details": result.stderr,
+                        },
+                    },
+                )
+
         except subprocess.TimeoutExpired:
-            logger.error(f"install_python_package: Installation of package '{package_name}' timed out after 120 seconds")
-            return JSONResponse(status_code=408, content={"ok": False, "error": {"message": "Installation timed out"}})
+            logger.error(
+                f"install_python_package: Installation of package '{package_name}' timed out after 120 seconds"
+            )
+            return JSONResponse(
+                status_code=408, content={"ok": False, "error": {"message": "Installation timed out"}}
+            )
         except Exception as e:
             logger.error(f"install_python_package: Installation failed with exception - {str(e)}")
-            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Installation failed: {str(e)}"}})
-    
-    @mcpo_app.post("/get_config",
-                   summary="Get Configuration", 
-                   description="Retrieve current mcpo.json configuration")
-    async def get_config(request: Request, form_data: Dict[str, Any]):
-        """Get current MCPO configuration."""
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": {"message": f"Installation failed: {str(e)}"}},
+            )
+
+    @mcpo_app.get(
+        "/get_config",
+        summary="Get Configuration",
+        description=(
+            "Read-only retrieval of the current mcpo.json. Use this to fetch the source of truth "
+            "before proposing any changes."
+        ),
+        operation_id="mcpo.get_config",
+        openapi_extra={
+            "x-instructions": [
+                "This endpoint is read-only.",
+                "Call this before any configuration change to obtain the exact current object.",
+                "Do not infer, normalize, or fix values; if something seems wrong, ask instead."
+            ]
+        },
+    )
+    async def get_config_get(request: Request):
         try:
             main_app = mcpo_app.state.main_app
             config_path = getattr(main_app.state, 'config_path', None)
             if not config_path:
-                return JSONResponse(status_code=400, content={"ok": False, "error": {"message": "No config file configured"}})
-            
-            with open(config_path, 'r') as f:
+                return JSONResponse(
+                    status_code=400,
+                    content={"ok": False, "error": {"message": "No config file configured"}},
+                )
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config_content = f.read()
-            
-            return {"ok": True, "config": json.loads(config_content), "path": config_path}
+            config_data = json.loads(config_content)
+            return {"config": config_data}
         except Exception as e:
-            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to get config: {str(e)}"}})
+            return JSONResponse(
+                status_code=500,
+                content={"ok": False, "error": {"message": f"Failed to get config: {str(e)}"}},
+            )
+
+    # legacy POST /get_config removed to enforce GET-only for reads
     
-    @mcpo_app.post("/post_config",
-                   summary="Update Configuration",
-                   description="Update configuration and trigger server reload")
-    async def post_config(request: Request, form_data: Dict[str, Any]):
+    @mcpo_app.post(
+        "/post_config",
+        summary="Update Configuration",
+        description=(
+            "Apply the minimal, explicitly requested change to the configuration and reload. \n\n"
+            "Process:\n"
+            "1) First GET /mcpo/get_config and start from the returned object.\n"
+            "2) Modify only the fields explicitly requested.\n"
+            "3) Preserve all other fields exactly; no reformatting, reordering, or inferred fixes.\n"
+            "4) Post a valid JSON object (no comments). On validation error, stop and report."
+        ),
+        operation_id="mcpo.post_config",
+        openapi_extra={
+            "x-instructions": [
+                "Always read current config first via GET /mcpo/get_config.",
+                "Perform minimal diffs only; do not touch unrelated fields.",
+                "Preserve structure and values verbatim for untouched areas.",
+                "No speculative fixes or improvements; ask if unsure.",
+                "Submit a valid JSON object; if an error occurs, stop and report."
+            ]
+        },
+    )
+    async def post_config(request: Request, body: PostConfigBody):
         """Update MCPO configuration."""
         try:
             main_app = mcpo_app.state.main_app
@@ -708,7 +761,7 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
             if not config_path:
                 return JSONResponse(status_code=400, content={"ok": False, "error": {"message": "No config file configured"}})
             
-            config_data = form_data.get("config")
+            config_data = body.config
             if not config_data:
                 return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing config data"}})
             
@@ -736,30 +789,51 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         except Exception as e:
             return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to update config: {str(e)}"}})
     
-    @mcpo_app.post("/get_logs",
-                   summary="Get Server Logs",
-                   description="Retrieve last 20 server log entries")
-    async def get_logs(request: Request, form_data: Dict[str, Any]):
+    @mcpo_app.get(
+        "/get_logs",
+        summary="Get Server Logs",
+        description="Read-only access to recent server log entries.",
+        operation_id="mcpo.get_logs",
+        openapi_extra={
+            "x-instructions": [
+                "Use logs for observation only.",
+                "Keep limits small (default 20).",
+                "Do not trigger writes based on interpretations without explicit instruction."
+            ]
+        },
+    )
+    async def get_logs_get(request: Request, limit: int = Query(20, ge=1, le=100)):
         """Get recent server logs."""
         try:
-            limit = form_data.get("limit", 20)
-            if limit > 100:  # Safety limit
-                limit = 100
-                
-            async with _log_buffer_lock:
-                recent_logs = list(_log_buffer)[-limit:] if _log_buffer else []
-            
+            log_manager = get_log_manager(MAX_LOG_ENTRIES)
+            recent_logs = log_manager.get_logs(source="openapi", limit=limit)
+
             return {"ok": True, "logs": recent_logs, "count": len(recent_logs)}
         except Exception as e:
             return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to get logs: {str(e)}"}})
+
+    # legacy POST /get_logs removed to enforce GET-only for reads
     
-    @mcpo_app.post("/post_env",
-                   summary="Update Environment Variables",
-                   description="Securely save API keys and environment variables to .env file")
-    async def post_env(request: Request, form_data: Dict[str, Any]):
+    @mcpo_app.post(
+        "/post_env",
+        summary="Update Environment Variables",
+        description=(
+            "Write only the provided keys to .env. Secrets are opaque; do not echo values."
+        ),
+        operation_id="mcpo.post_env",
+        openapi_extra={
+            "x-instructions": [
+                "Only set the keys provided by the user.",
+                "Do not modify or delete other keys.",
+                "Never echo or log secret values.",
+                "Treat values as opaque strings."
+            ]
+        },
+    )
+    async def post_env(request: Request, body: PostEnvBody):
         """Update .env file with environment variables."""
         try:
-            env_vars = form_data.get("env_vars")
+            env_vars = body.env_vars
             if not env_vars or not isinstance(env_vars, dict):
                 logger.warning("post_env: Missing or invalid env_vars parameter")
                 return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing or invalid env_vars (must be dict)"}})
@@ -796,148 +870,22 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
             logger.error(f"post_env: Failed to update environment variables: {str(e)}")
             return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to update env: {str(e)}"}})
     
-    @mcpo_app.post("/setup_server",
-                   summary="Complete Server Setup",
-                   description="Full server setup: update config, install dependencies, validate, and check logs")
-    async def setup_server(request: Request, form_data: Dict[str, Any]):
-        """Complete server setup workflow for OpenWebUI models."""
-        try:
-            server_name = form_data.get("server_name")
-            server_config = form_data.get("server_config")
-            api_keys = form_data.get("api_keys", {})
-            
-            if not server_name or not server_config:
-                logger.warning("setup_server: Missing server_name or server_config")
-                return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing server_name or server_config"}})
-            
-            logger.info(f"setup_server: Starting complete setup for server '{server_name}'")
-            
-            results = {
-                "server_name": server_name,
-                "steps": [],
-                "success": True,
-                "errors": []
-            }
-            
-            # Step 1: Update environment variables (API keys)
-            if api_keys:
-                try:
-                    logger.info(f"setup_server: Step 1 - Updating API keys: {list(api_keys.keys())}")
-                    env_result = await post_env(request, {"env_vars": api_keys})
-                    if isinstance(env_result, JSONResponse):
-                        env_data = json.loads(env_result.body.decode())
-                        if not env_data.get("ok"):
-                            results["success"] = False
-                            results["errors"].append(f"API key update failed: {env_data.get('error', {}).get('message')}")
-                    results["steps"].append({"step": "update_api_keys", "status": "success", "details": f"Updated {len(api_keys)} API keys"})
-                    logger.info(f"setup_server: Step 1 completed - API keys updated")
-                except Exception as e:
-                    results["success"] = False
-                    results["errors"].append(f"API key update failed: {str(e)}")
-                    results["steps"].append({"step": "update_api_keys", "status": "failed", "error": str(e)})
-                    logger.error(f"setup_server: Step 1 failed - {str(e)}")
-            
-            # Step 2: Update configuration
-            try:
-                logger.info(f"setup_server: Step 2 - Updating configuration for server '{server_name}'")
-                main_app = mcpo_app.state.main_app
-                config_path = getattr(main_app.state, 'config_path', None)
-                
-                if not config_path:
-                    results["success"] = False
-                    results["errors"].append("No config file configured")
-                    results["steps"].append({"step": "update_config", "status": "failed", "error": "No config file"})
-                else:
-                    # Read current config
-                    with open(config_path, 'r') as f:
-                        current_config = json.load(f)
-                    
-                    # Update server configuration
-                    if "mcpServers" not in current_config:
-                        current_config["mcpServers"] = {}
-                    
-                    current_config["mcpServers"][server_name] = server_config
-                    
-                    # Save updated config
-                    config_result = await post_config(request, {"config": current_config})
-                    if isinstance(config_result, JSONResponse):
-                        config_data = json.loads(config_result.body.decode())
-                        if not config_data.get("ok"):
-                            results["success"] = False
-                            results["errors"].append(f"Config update failed: {config_data.get('error', {}).get('message')}")
-                    
-                    results["steps"].append({"step": "update_config", "status": "success", "details": f"Added/updated server '{server_name}'"})
-                    logger.info(f"setup_server: Step 2 completed - Configuration updated")
-                    
-            except Exception as e:
-                results["success"] = False
-                results["errors"].append(f"Config update failed: {str(e)}")
-                results["steps"].append({"step": "update_config", "status": "failed", "error": str(e)})
-                logger.error(f"setup_server: Step 2 failed - {str(e)}")
-            
-            # Step 3: Install dependencies (if specified)
-            dependencies = form_data.get("dependencies", [])
-            if dependencies:
-                for package in dependencies:
-                    try:
-                        logger.info(f"setup_server: Step 3 - Installing package '{package}'")
-                        install_result = await install_python_package(request, {"package_name": package})
-                        if isinstance(install_result, JSONResponse):
-                            install_data = json.loads(install_result.body.decode())
-                            if not install_data.get("ok"):
-                                results["success"] = False
-                                results["errors"].append(f"Package installation failed: {package}")
-                                results["steps"].append({"step": f"install_{package}", "status": "failed", "error": install_data.get('error', {}).get('message')})
-                            else:
-                                results["steps"].append({"step": f"install_{package}", "status": "success", "details": f"Installed {package}"})
-                                logger.info(f"setup_server: Package '{package}' installed successfully")
-                        else:
-                            results["steps"].append({"step": f"install_{package}", "status": "success", "details": f"Installed {package}"})
-                            logger.info(f"setup_server: Package '{package}' installed successfully")
-                    except Exception as e:
-                        results["success"] = False
-                        results["errors"].append(f"Package installation failed: {package} - {str(e)}")
-                        results["steps"].append({"step": f"install_{package}", "status": "failed", "error": str(e)})
-                        logger.error(f"setup_server: Package '{package}' installation failed - {str(e)}")
-            
-            # Step 4: Validation check (get recent logs)
-            try:
-                logger.info("setup_server: Step 4 - Checking recent logs for validation")
-                await asyncio.sleep(2)  # Wait for any async operations to complete
-                logs_result = await get_logs(request, {"limit": 10})
-                if isinstance(logs_result, dict) and logs_result.get("ok"):
-                    recent_logs = logs_result.get("logs", [])
-                    error_logs = [log for log in recent_logs if log.get("level") in ["ERROR", "WARNING"]]
-                    
-                    if error_logs:
-                        results["warnings"] = [f"{log['level']}: {log['message']}" for log in error_logs[-3:]]
-                        logger.warning(f"setup_server: Found {len(error_logs)} warning/error logs in recent activity")
-                    
-                    results["steps"].append({"step": "validation", "status": "success", "details": f"Checked {len(recent_logs)} recent log entries"})
-                    results["recent_logs"] = recent_logs[-5:]  # Include last 5 logs
-                    logger.info("setup_server: Step 4 completed - Log validation done")
-                
-            except Exception as e:
-                results["steps"].append({"step": "validation", "status": "failed", "error": str(e)})
-                logger.error(f"setup_server: Step 4 failed - {str(e)}")
-            
-            # Final result
-            if results["success"]:
-                logger.info(f"setup_server: Complete setup successful for server '{server_name}'")
-                results["message"] = f"Server '{server_name}' setup completed successfully"
-            else:
-                logger.error(f"setup_server: Setup failed for server '{server_name}' with {len(results['errors'])} errors")
-                results["message"] = f"Server '{server_name}' setup completed with errors"
-            
-            return results
-            
-        except Exception as e:
-            logger.error(f"setup_server: Critical failure - {str(e)}")
-            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Setup failed: {str(e)}"}})
+    # setup_server endpoint removed per design: enforce granular operations only
     
-    @mcpo_app.post("/validate_and_install",
-                   summary="Validate Config and Install Dependencies",
-                   description="Validate configuration and install any required dependencies")
+    @mcpo_app.post(
+        "/validate_and_install",
+        summary="Validate Config and Install Dependencies",
+        description=(
+            "Validate current configuration and, if requirements.txt exists, install dependencies."
+        ),
+        operation_id="mcpo.validate_and_install",
+        openapi_extra={
+            "x-instructions": [
+                "Use for validation and dependency setup only when explicitly requested.",
+                "Do not alter configuration content beyond validation scope."
+            ]
+        },
+    )
     async def validate_and_install(request: Request, form_data: Dict[str, Any]):
         """Validate configuration and install dependencies."""
         try:
@@ -1027,6 +975,98 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         except Exception as e:
             logger.error(f"validate_and_install: Critical failure - {str(e)}")
             return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Validation failed: {str(e)}"}})
+
+    @mcpo_app.get(
+        "/get_requirements",
+        summary="Get requirements.txt contents",
+        description="Read-only view of requirements.txt.",
+        operation_id="mcpo.get_requirements",
+        openapi_extra={
+            "x-instructions": [
+                "Do not make changes via this endpoint.",
+                "Use POST /mcpo/post_requirements for edits."
+            ]
+        },
+    )
+    async def get_requirements_get(request: Request):
+        try:
+            if os.path.exists("requirements.txt"):
+                with open("requirements.txt", "r", encoding="utf-8") as f:
+                    content = f.read()
+                return {"ok": True, "content": content}
+            # create a sensible default template when missing
+            return {"ok": True, "content": "# Python packages for MCP servers\n"}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to read requirements: {str(e)}"}})
+
+    # legacy POST /get_requirements removed to enforce GET-only for reads
+
+    @mcpo_app.post(
+        "/post_requirements",
+        summary="Write requirements.txt and install",
+        description=(
+            "Write the provided content verbatim to requirements.txt, install with pip -r, and attempt a hot reload. \n\n"
+            "Rules:\n"
+            "- Add or remove only what was explicitly requested.\n"
+            "- Do not upgrade unrelated packages or add flags.\n"
+            "- Keep other lines unchanged."
+        ),
+        operation_id="mcpo.post_requirements",
+        openapi_extra={
+            "x-instructions": [
+                "Edit exactly as requested; preserve unrelated lines.",
+                "Do not add upgrade flags or extras.",
+                "On install error, report and stop."
+            ]
+        },
+    )
+    async def post_requirements(request: Request, body: PostRequirementsBody):
+        try:
+            content = body.content
+            if content is None or not isinstance(content, str):
+                return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing or invalid 'content'"}})
+
+            # Write requirements.txt
+            try:
+                with open("requirements.txt", "w", encoding="utf-8") as f:
+                    f.write(content)
+            except Exception as e:
+                return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to write requirements.txt: {str(e)}"}})
+
+            # Parse packages for response
+            packages = [
+                line.strip()
+                for line in content.splitlines()
+                if line.strip() and not line.strip().startswith('#')
+            ]
+
+            # Install with pip
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                if result.returncode != 0:
+                    logger.error("pip install failed: %s", result.stderr)
+                    return JSONResponse(status_code=500, content={"ok": False, "error": {"message": "Dependency installation failed", "details": result.stderr}})
+            except subprocess.TimeoutExpired:
+                return JSONResponse(status_code=408, content={"ok": False, "error": {"message": "Dependency installation timed out"}})
+
+            # Attempt hot reload if config is present
+            try:
+                main = mcpo_app.state.main_app
+                cfg_path = getattr(main.state, 'config_path', None)
+                if cfg_path and os.path.exists(cfg_path):
+                    new_config = load_config(cfg_path)
+                    await reload_config_handler(main, new_config)
+            except Exception as e:
+                logger.warning("Reload after requirements install failed: %s", e)
+
+            return {"ok": True, "message": "Requirements installed and servers reloaded", "packages": packages}
+        except Exception as e:
+            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to process requirements: {str(e)}"}})
     
     # Add API key protection if main app has it
     if api_dependency:
@@ -1075,26 +1115,30 @@ async def build_main_app(
     ssl_certfile = kwargs.get("ssl_certfile")
     ssl_keyfile = kwargs.get("ssl_keyfile")
     path_prefix = kwargs.get("path_prefix") or "/"
+    log_level = kwargs.get("log_level", "info").upper()
 
     # Configure basic logging
     logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+        level=getattr(logging, log_level, logging.INFO),
+        format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
     # Add log buffer handler for UI
-    log_buffer_handler = LogBufferHandler()
-    logging.getLogger().addHandler(log_buffer_handler)
-
-    # Suppress HTTP request logs
-    class HTTPRequestFilter(logging.Filter):
-        def filter(self, record):
-            return not (
-                record.levelname == "INFO" and "HTTP Request:" in record.getMessage()
+    root_logger = logging.getLogger()
+    root_logger.setLevel(getattr(logging, log_level, logging.INFO))
+    if not any(isinstance(handler, BufferedLogHandler) for handler in root_logger.handlers):
+        root_logger.addHandler(
+            BufferedLogHandler(
+                _log_buffer,
+                _log_buffer_lock,
+                default_source="openapi",
+                max_entries=MAX_LOG_ENTRIES,
             )
+        )
 
-    # Apply filter to suppress HTTP request logs
-    logging.getLogger("uvicorn.access").addFilter(HTTPRequestFilter())
-    logging.getLogger("httpx.access").addFilter(HTTPRequestFilter())
+    # Ensure access logs are retained for troubleshooting; rely on logging config for verbosity
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    logging.getLogger("httpx").setLevel(logging.INFO)
     logger.info("Starting MCPO Server...")
     logger.info(f"  Name: {name}")
     logger.info(f"  Version: {version}")
@@ -1121,10 +1165,23 @@ async def build_main_app(
         lifespan=lifespan,
         openapi_version="3.1.0",
     )
-    # Enable state maps - load from persisted state if available
-    persisted_state = load_state_file(config_path)
-    main_app.state.server_enabled = persisted_state["server_enabled"]
-    main_app.state.tool_enabled = persisted_state["tool_enabled"]
+    # Mount admin router for utility endpoints (e.g., /_meta/env)
+    try:
+        main_app.include_router(admin_router, prefix="/_meta")
+    except Exception:
+        # Router mount failures should not prevent core startup
+        logger.exception("Failed to include admin router")
+    try:
+        main_app.include_router(chat_router, prefix="/chat")
+    except Exception:
+        logger.exception("Failed to include chat router")
+    try:
+        main_app.include_router(completions_router, prefix="")
+    except Exception:
+        logger.exception("Failed to include completions router")
+    # Initialize shared StateManager
+    state_manager = get_state_manager()
+    main_app.state.state_manager = state_manager
     # Metrics counters (simple in-memory; reset on restart)
     main_app.state.metrics = {
         "tool_calls_total": 0,
@@ -1137,6 +1194,12 @@ async def build_main_app(
     main_app.state.protocol_version_mode = protocol_version_mode
     main_app.state.validate_output_mode = validate_output_mode
     main_app.state.supported_protocol_versions = supported_protocol_versions
+    proxy_url = kwargs.get("mcp_proxy_url")
+    if not proxy_url:
+        proxy_host = host if host and host not in {"0.0.0.0", "::", "0"} else "127.0.0.1"
+        proxy_port = kwargs.get("mcp_proxy_port") or (port + 1 if port else 8001)
+        proxy_url = f"http://{proxy_host}:{proxy_port}"
+    main_app.state.mcp_proxy_url = proxy_url
 
     # Standardized error handlers
     @main_app.exception_handler(Exception)
@@ -1200,6 +1263,7 @@ async def build_main_app(
     @main_app.get("/_meta/servers")
     async def list_servers():  # noqa: D401
         _update_health_snapshot(main_app)
+        state_manager = main_app.state.state_manager
         servers = []
         for route in main_app.router.routes:
             if isinstance(route, Mount) and isinstance(route.app, FastAPI):
@@ -1220,12 +1284,13 @@ async def build_main_app(
                     "connected": is_connected,
                     "type": server_type,
                     "basePath": route.path.rstrip('/') + '/',
-                    "enabled": main_app.state.server_enabled.get(config_key, True),
+                    "enabled": state_manager.is_server_enabled(config_key),
                 })
         return {"ok": True, "servers": servers}
 
     @main_app.get("/_meta/servers/{server_name}/tools")
     async def list_server_tools(server_name: str):  # noqa: D401
+        state_manager = main_app.state.state_manager
         # Find mounted server
         for route in main_app.router.routes:
             if isinstance(route, Mount) and isinstance(route.app, FastAPI) and route.path.rstrip('/') == f"/{server_name}":
@@ -1242,7 +1307,7 @@ async def build_main_app(
                             if sub.title == "MCPO Management Server":
                                 is_enabled = True  # Internal tools are always enabled
                             else:
-                                is_enabled = main_app.state.tool_enabled.get(server_name, {}).get(tname, True)
+                                is_enabled = state_manager.is_tool_enabled(server_name, tname)
                             
                             tools.append({
                                 "name": tname,
@@ -1250,6 +1315,35 @@ async def build_main_app(
                             })
                 return {"ok": True, "server": server_name, "tools": sorted(tools, key=lambda x: x['name'])}
         return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
+
+    @main_app.get("/chat/tools")
+    async def list_chat_tools(server: Optional[str] = None):
+        state_manager = main_app.state.state_manager
+        if server:
+            server_names = [server]
+        else:
+            server_names = [
+                name
+                for name, state in state_manager.get_all_states().items()
+                if state.get("enabled", True)
+            ]
+
+        tools: Dict[str, List[str]] = {}
+        for route in main_app.router.routes:
+            if isinstance(route, Mount) and isinstance(route.app, FastAPI):
+                mount_name = route.path.strip('/')
+                if mount_name not in server_names:
+                    continue
+                sub_app = route.app
+                collected: List[str] = []
+                for r in sub_app.router.routes:
+                    methods = getattr(r, 'methods', set())
+                    path = getattr(r, 'path', '')
+                    if 'POST' in methods and path.count('/') == 1 and path not in ('/docs', '/openapi.json'):
+                        collected.append(path.lstrip('/'))
+                tools[mount_name] = sorted(collected)
+
+        return {"ok": True, "tools": tools}
 
     @main_app.get("/_meta/config")
     async def config_info():  # noqa: D401
@@ -1264,14 +1358,19 @@ async def build_main_app(
         Counts are derived from in-memory state; tool call/error counters are incremented
         inside the dynamic tool handlers.
         """
-        server_enabled_map = getattr(main_app.state, 'server_enabled', {})
-        tool_enabled_map = getattr(main_app.state, 'tool_enabled', {})
-        servers_total = len(server_enabled_map)
-        servers_enabled = sum(1 for v in server_enabled_map.values() if v)
-        tools_total = sum(len(tool_map) for tool_map in tool_enabled_map.values())
+        state_manager = main_app.state.state_manager
+        all_states = state_manager.get_all_states()
+        
+        servers_total = len(all_states)
+        servers_enabled = sum(1 for state in all_states.values() if state.get('enabled', True))
+        
+        tools_total = 0
         tools_enabled = 0
-        for tmap in tool_enabled_map.values():
-            tools_enabled += sum(1 for v in tmap.values() if v)
+        for state in all_states.values():
+            server_tools = state.get('tools', {})
+            tools_total += len(server_tools)
+            tools_enabled += sum(1 for enabled in server_tools.values() if enabled)
+        
         m = getattr(main_app.state, 'metrics', {})
         per_tool_metrics = {}
         for tname, stats in m.get('per_tool', {}).items():
@@ -1339,41 +1438,32 @@ async def build_main_app(
     async def enable_server(server_name: str):
         if getattr(main_app.state, 'read_only_mode', False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        if server_name not in main_app.state.server_enabled:
-            main_app.state.server_enabled[server_name] = True
-        else:
-            main_app.state.server_enabled[server_name] = True
-        # Persist state change
-        save_state_file(main_app.state.config_path, main_app.state.server_enabled, main_app.state.tool_enabled)
+        state_manager = main_app.state.state_manager
+        state_manager.set_server_enabled(server_name, True)
         return {"ok": True, "server": server_name, "enabled": True}
 
     @main_app.post("/_meta/servers/{server_name}/disable")
     async def disable_server(server_name: str):
         if getattr(main_app.state, 'read_only_mode', False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        main_app.state.server_enabled[server_name] = False
-        # Persist state change
-        save_state_file(main_app.state.config_path, main_app.state.server_enabled, main_app.state.tool_enabled)
+        state_manager = main_app.state.state_manager
+        state_manager.set_server_enabled(server_name, False)
         return {"ok": True, "server": server_name, "enabled": False}
 
     @main_app.post("/_meta/servers/{server_name}/tools/{tool_name}/enable")
     async def enable_tool(server_name: str, tool_name: str):
         if getattr(main_app.state, 'read_only_mode', False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        tool_state = main_app.state.tool_enabled.setdefault(server_name, {})
-        tool_state[tool_name] = True
-        # Persist state change
-        save_state_file(main_app.state.config_path, main_app.state.server_enabled, main_app.state.tool_enabled)
+        state_manager = main_app.state.state_manager
+        state_manager.set_tool_enabled(server_name, tool_name, True)
         return {"ok": True, "server": server_name, "tool": tool_name, "enabled": True}
 
     @main_app.post("/_meta/servers/{server_name}/tools/{tool_name}/disable")
     async def disable_tool(server_name: str, tool_name: str):
         if getattr(main_app.state, 'read_only_mode', False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        tool_state = main_app.state.tool_enabled.setdefault(server_name, {})
-        tool_state[tool_name] = False
-        # Persist state change
-        save_state_file(main_app.state.config_path, main_app.state.server_enabled, main_app.state.tool_enabled)
+        state_manager = main_app.state.state_manager
+        state_manager.set_tool_enabled(server_name, tool_name, False)
         return {"ok": True, "server": server_name, "tool": tool_name, "enabled": False}
 
     @main_app.post("/_meta/servers")
@@ -1461,11 +1551,95 @@ async def build_main_app(
             return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
         return {"ok": True, "removed": server_name}
 
+    @main_app.get("/_meta/logs/sources")
+    async def get_log_sources():
+        """Get available log sources for UI."""
+        proxy_url = getattr(main_app.state, "mcp_proxy_url", None)
+        sources = [
+            {
+                "id": "openapi",
+                "label": "OpenAPI Server",
+                "port": 8000,
+                "available": True
+            }
+        ]
+        if proxy_url:
+            sources.append({
+                "id": "mcp",
+                "label": "MCP Proxy",
+                "port": 8001,
+                "available": True
+            })
+        return {"ok": True, "sources": sources}
+
     @main_app.get("/_meta/logs")
-    async def get_logs():
+    async def get_logs(
+        cursor: Optional[int] = None,
+        limit: int = 500,
+        source: Optional[str] = None,
+        category: Optional[str] = None,
+    ):
         """Get recent log entries for UI display."""
-        async with _log_buffer_lock:
-            return {"ok": True, "logs": list(_log_buffer)}
+        log_manager = get_log_manager(MAX_LOG_ENTRIES)
+        log_source = (source or "openapi").lower()
+        effective_limit = max(1, min(limit, MAX_LOG_ENTRIES))
+
+        if log_source == "mcp":
+            proxy_url = getattr(main_app.state, "mcp_proxy_url", None)
+            if not proxy_url:
+                return {
+                    "ok": False,
+                    "error": {"message": "MCP proxy URL not configured"},
+                }
+            try:
+                target = urljoin(proxy_url.rstrip("/") + "/", "_meta/logs")
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    response = await client.get(
+                        target,
+                        params={
+                            key: value
+                            for key, value in {
+                                "cursor": cursor,
+                                "limit": effective_limit,
+                                "category": category,
+                                "source": "mcp",
+                            }.items()
+                            if value is not None
+                        },
+                    )
+                response.raise_for_status()
+                payload = response.json()
+                if isinstance(payload, dict):
+                    return payload
+                return {
+                    "ok": False,
+                    "error": {"message": "Unexpected response from MCP proxy"},
+                }
+            except Exception as exc:  # pragma: no cover - network failure path
+                logger.warning("Failed to fetch MCP proxy logs: %s", exc)
+                return {
+                    "ok": False,
+                    "error": {"message": f"Failed to fetch MCP logs: {exc}"},
+                }
+
+        # Exclude httpx logs from openapi source to avoid showing proxy fetch logs
+        exclude_logger = "httpx" if log_source == "openapi" else None
+        entries = log_manager.get_logs(
+            category=category,
+            source=log_source,
+            after=cursor,
+            limit=effective_limit,
+            exclude_logger=exclude_logger,
+        )
+        latest_cursor = log_manager.get_latest_sequence()
+        next_cursor = entries[-1]["sequence"] if entries else latest_cursor
+        return {
+            "ok": True,
+            "logs": entries,
+            "nextCursor": next_cursor,
+            "latestCursor": latest_cursor,
+            "limit": effective_limit,
+        }
 
     @main_app.get("/_meta/config/content")
     async def get_config_content():
@@ -1482,6 +1656,23 @@ async def build_main_app(
             return JSONResponse(status_code=404, content=error_envelope("Config file not found", code="not_found"))
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to read config", data=str(e), code="io_error"))
+
+    @main_app.get("/_meta/config/mcpServers")
+    async def get_mcp_servers_content():
+        """Return only the mcpServers section as a JSON string."""
+        config_path = getattr(main_app.state, 'config_path', None)
+        if not config_path:
+            return JSONResponse(status_code=400, content=error_envelope("No config file configured", code="no_config"))
+        try:
+            with open(config_path, 'r') as f:
+                cfg = json.load(f)
+            mcp_servers = cfg.get("mcpServers", {})
+            content = json.dumps(mcp_servers, indent=2)
+            return {"ok": True, "content": content, "path": config_path}
+        except FileNotFoundError:
+            return JSONResponse(status_code=404, content=error_envelope("Config file not found", code="not_found"))
+        except Exception as e:
+            return JSONResponse(status_code=500, content=error_envelope("Failed to read mcpServers", data=str(e), code="io_error"))
 
     @main_app.post("/_meta/config/save")
     async def save_config_content(payload: Dict[str, Any]):
@@ -1518,6 +1709,58 @@ async def build_main_app(
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to save config", data=str(e), code="io_error"))
 
+    @main_app.post("/_meta/config/mcpServers/save")
+    async def save_mcp_servers_content(payload: Dict[str, Any]):
+        """Update only the mcpServers section of the config and reload.
+
+        Accepts either:
+        - { "content": "{ ... }" } where content is a JSON string of the mcpServers object
+        - { "data": { ... } } where data is the parsed mcpServers object
+        """
+        config_path = getattr(main_app.state, 'config_path', None)
+        if not config_path:
+            return JSONResponse(status_code=400, content=error_envelope("No config file configured", code="no_config"))
+
+        has_content = "content" in payload
+        has_data = "data" in payload
+        if not has_content and not has_data:
+            return JSONResponse(status_code=422, content=error_envelope("Missing content or data", code="invalid"))
+
+        try:
+            if has_content:
+                new_mcp = json.loads(payload["content"])
+            else:
+                new_mcp = payload["data"]
+
+            if not isinstance(new_mcp, dict):
+                return JSONResponse(status_code=422, content=error_envelope("mcpServers must be an object", code="invalid_type"))
+
+            # Load full config
+            try:
+                with open(config_path, 'r') as f:
+                    full_cfg = json.load(f)
+            except FileNotFoundError:
+                full_cfg = {}
+
+            # Replace mcpServers section
+            full_cfg["mcpServers"] = new_mcp
+
+            # Persist
+            with open(config_path, 'w') as f:
+                json.dump(full_cfg, f, indent=2)
+
+            # Reload runtime and remount proxy paths
+            new_config = load_config(config_path)
+            await reload_config_handler(main_app, new_config)
+            _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+            main_app.state.aggregate_openapi_dirty = True
+
+            return {"ok": True, "saved": True, "reloaded": True}
+        except json.JSONDecodeError as e:
+            return JSONResponse(status_code=422, content=error_envelope("Invalid JSON", data=str(e), code="invalid_json"))
+        except Exception as e:
+            return JSONResponse(status_code=500, content=error_envelope("Failed to save mcpServers", data=str(e), code="io_error"))
+
     @main_app.get("/_meta/requirements/content")
     async def get_requirements_content():
         """Get requirements.txt content."""
@@ -1541,15 +1784,50 @@ async def build_main_app(
         try:
             with open("requirements.txt", 'w') as f:
                 f.write(content)
-            
-            # Optionally trigger pip install here
-            logger.info("Requirements.txt updated")
-            return {"ok": True, "message": "Requirements saved successfully"}
+            logger.info("Requirements.txt updated; installing packages...")
+
+            # Parse package list for response
+            packages = [
+                line.strip()
+                for line in content.splitlines()
+                if line.strip() and not line.strip().startswith('#')
+            ]
+
+            # Install packages with pip
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                    capture_output=True,
+                    text=True,
+                    timeout=600,
+                )
+                if result.returncode != 0:
+                    logger.error("pip install failed: %s", result.stderr)
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope("Dependency installation failed", data=result.stderr, code="pip_failed"),
+                    )
+            except subprocess.TimeoutExpired:
+                return JSONResponse(
+                    status_code=408,
+                    content=error_envelope("Dependency installation timed out", code="pip_timeout"),
+                )
+
+            # Reload servers if running with a config file
+            config_path = getattr(main_app.state, 'config_path', None)
+            if config_path and os.path.exists(config_path):
+                try:
+                    new_config = load_config(config_path)
+                    await reload_config_handler(main_app, new_config)
+                except Exception as e:  # pragma: no cover
+                    logger.warning("Reload after requirements install failed: %s", e)
+
+            return {"ok": True, "message": "Requirements installed and servers reloaded", "packages": packages}
             
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to save requirements", data=str(e), code="io_error"))
 
-    # Create internal MCPO MCP server for self-management tools
+    # Create internal MCPO MCP server for self-management tools (mounted under /mcpo)
     mcpo_app = await create_internal_mcpo_server(main_app, api_dependency)
     main_app.mount("/mcpo", mcpo_app, name="mcpo")
 
@@ -1692,13 +1970,14 @@ async def run(
         config_watcher.start()
 
     logger.info("Uvicorn server starting...")
+    log_level = kwargs.get("log_level", "info").lower()
     config = uvicorn.Config(
         app=main_app,
         host=host,
         port=port,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
-        log_level="info",
+        log_level=log_level,
     )
     server = uvicorn.Server(config)
 

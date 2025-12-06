@@ -1,10 +1,3 @@
-# Sample Python dependencies for MCPO
-# These will be automatically installed when the server starts
-# or when saved via the UI
-
-# Example packages (uncomment as needed):
-# requests>=2.31.0
-# beautifulsoup4>=4.12.0
-# pandas>=2.0.0
-# numpy>=1.24.0
-# pillow>=10.0.0
+# Project dependencies are managed via pyproject.toml.
+# Install in editable mode for local development:
+-e .

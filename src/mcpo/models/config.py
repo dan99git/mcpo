@@ -1,32 +1,34 @@
 from __future__ import annotations
-from typing import List, Optional, Literal
-from pydantic import BaseModel, Field, AnyHttpUrl, model_validator
 
-ServerType = Literal["stdio", "sse", "streamable-http"]
+from typing import List, Optional, Literal
+from pydantic import BaseModel, field_validator, HttpUrl, model_validator
+
 
 class ServerConfig(BaseModel):
-    name: str = Field(min_length=1)
-    type: ServerType
+    name: str
+    type: Literal["stdio", "sse", "streamable-http"]
     command: Optional[str] = None
-    args: List[str] = Field(default_factory=list)
-    url: Optional[AnyHttpUrl] = None
-    headers: Optional[dict] = None
-    disabled: bool = False
+    args: Optional[List[str]] = None
+    url: Optional[HttpUrl] = None
 
     @model_validator(mode="after")
-    def validate_mode(self):
-        if self.type == "stdio" and not self.command:
-            raise ValueError("'command' is required for stdio server")
-        if self.type in ("sse", "streamable-http") and not self.url:
-            raise ValueError("'url' is required for remote server types")
+    def _validate(self) -> "ServerConfig":
+        if self.type == "stdio":
+            if not self.command:
+                raise ValueError("stdio requires 'command'")
+        elif self.type in ("sse", "streamable-http"):
+            if not self.url:
+                raise ValueError("remote server requires 'url'")
         return self
+
 
 class AppConfig(BaseModel):
     servers: List[ServerConfig]
 
-    @model_validator(mode="after")
-    def check_unique(self):
-        names = [s.name for s in self.servers]
+    @field_validator("servers")
+    @classmethod
+    def _unique_names(cls, v: List[ServerConfig]) -> List[ServerConfig]:
+        names = [s.name for s in v]
         if len(names) != len(set(names)):
-            raise ValueError("server names must be unique")
-        return self
+            raise ValueError("Server names must be unique")
+        return v

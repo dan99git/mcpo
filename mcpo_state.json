@@ -1,0 +1,64 @@
+{
+  "server_states": {
+    "perplexity": {
+      "enabled": true,
+      "tools": {
+        "deep_research": true,
+        "reason": true,
+        "search": true
+      }
+    },
+    "time": {
+      "enabled": true,
+      "tools": {}
+    },
+    "playwright": {
+      "enabled": false,
+      "tools": {
+        "browser_click": true,
+        "browser_console_messages": true,
+        "browser_resize": true,
+        "browser_press_key": true,
+        "browser_snapshot": true
+      }
+    },
+    "s1": {
+      "enabled": false,
+      "tools": {}
+    },
+    "memory": {
+      "enabled": false,
+      "tools": {}
+    },
+    "echo-server": {
+      "enabled": true,
+      "tools": {}
+    },
+    "mcpo": {
+      "enabled": true,
+      "tools": {}
+    },
+    "chrome-devtools": {
+      "enabled": false,
+      "tools": {
+        "upload_file": false,
+        "take_snapshot": false,
+        "take_screenshot": false
+      }
+    },
+    "new_server": {
+      "enabled": true,
+      "tools": {}
+    }
+  },
+  "provider_states": {},
+  "model_states": {},
+  "favorite_models": [
+    "gpt-4o",
+    "claude-3-opus",
+    "minimax/MiniMax-M2",
+    "anthropic/claude-opus-4.5",
+    "google/gemini-3-pro-preview",
+    "openai/gpt-5.1-codex-max"
+  ]
+}
