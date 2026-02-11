@@ -1,39 +1,48 @@
 """
-MiniMax AI Provider
+MiniMax AI Provider — Anthropic Coding Plan Endpoint
 
-Supports MiniMax models via their official API at platform.minimax.io.
-Implements interleaved thinking format with <think>...</think> blocks.
+Routes MiniMax models through MiniMax's Anthropic-compatible API at
+https://api.minimax.io/anthropic (the officially RECOMMENDED endpoint).
 
-Available Models:
-- MiniMax-M2: Latest model, 204,800 token context, agent-native
-- MiniMax-M1: 456B parameter hybrid MoE, reasoning-intensive
-- MiniMax-Text-01: Text generation model
+This is a thin wrapper around AnthropicClient with MiniMax-specific
+base URL and API key.  All heavy lifting (message mapping, thinking
+blocks, tool_use, streaming, retries) is handled by the Anthropic
+provider.
 
-API Documentation: https://platform.minimax.io/docs/api-reference/text-post
+Available Models (via Anthropic Coding Plan endpoint):
+- MiniMax-M2.1        : Polyglot programming, ~60 tps
+- MiniMax-M2.1-lightning : Faster and more agile, ~100 tps
+- MiniMax-M2          : Agentic capabilities, advanced reasoning
+
+API Documentation:
+  https://platform.minimax.io/docs/api-reference/text-anthropic-api
+Coding Plan:
+  https://platform.minimax.io/subscribe/coding-plan
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 from typing import Any, AsyncIterator, Dict, Iterable, List, Optional
 
-import httpx
+from mcpo.providers.anthropic import AnthropicClient, AnthropicError
 
 logger = logging.getLogger(__name__)
+
+# Default base URL — MiniMax Anthropic-compatible (RECOMMENDED by MiniMax)
+MINIMAX_ANTHROPIC_BASE_URL = "https://api.minimax.io/anthropic"
 
 
 class MiniMaxError(RuntimeError):
     """Raised when the MiniMax API returns an error payload."""
 
 
-# MiniMax model definitions
+# MiniMax model definitions (Anthropic Coding Plan endpoint)
 MINIMAX_MODELS = [
-    {"id": "minimax/MiniMax-M2", "label": "MiniMax M2 (204K context)"},
-    {"id": "minimax/MiniMax-M1", "label": "MiniMax M1 (456B MoE)"},
-    {"id": "minimax/MiniMax-Text-01", "label": "MiniMax Text 01"},
+    {"id": "minimax/MiniMax-M2.1", "label": "MiniMax M2.1 (Coding Plan, ~60 tps)"},
+    {"id": "minimax/MiniMax-M2.1-lightning", "label": "MiniMax M2.1 Lightning (~100 tps)"},
+    {"id": "minimax/MiniMax-M2", "label": "MiniMax M2 (Agentic, Advanced Reasoning)"},
 ]
 
 
@@ -56,10 +65,17 @@ def get_minimax_model_name(model_id: str) -> str:
 
 class MiniMaxClient:
     """
-    Async client for the MiniMax chat completions API.
-    
-    Supports interleaved thinking format with <think>...</think> blocks
-    and reasoning_details field for multi-turn reasoning continuity.
+    Async client for MiniMax via the Anthropic-compatible Coding Plan API.
+
+    Delegates to AnthropicClient with:
+      base_url = https://api.minimax.io/anthropic
+      api_key  = MINIMAX_API_KEY
+
+    Supports thinking blocks, tool_use, streaming — all handled by the
+    Anthropic provider's message mapping and SSE translation.
+
+    The external interface (chat_completion / chat_completion_stream with
+    max_output_tokens) is preserved so callers in chat.py need zero changes.
     """
 
     def __init__(
@@ -74,16 +90,23 @@ class MiniMaxClient:
             raise MiniMaxError("MINIMAX_API_KEY environment variable is required")
 
         self._base_url = (
-            base_url or 
-            os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat/v1")
+            base_url
+            or os.getenv("MINIMAX_BASE_URL", MINIMAX_ANTHROPIC_BASE_URL)
         ).rstrip("/")
-        self._timeout = timeout or 120.0  # MiniMax can be slower for reasoning
+        self._timeout = timeout or 120.0
 
-    def _default_headers(self) -> Dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._api_key}",
-            "Content-Type": "application/json",
-        }
+        # Instantiate the underlying Anthropic client pointed at MiniMax.
+        # Prompt caching is disabled — MiniMax may not support Anthropic
+        # cache_control headers.
+        try:
+            self._anthropic = AnthropicClient(
+                api_key=self._api_key,
+                base_url=self._base_url,
+                timeout=self._timeout,
+                enable_prompt_caching=False,
+            )
+        except AnthropicError as exc:
+            raise MiniMaxError(str(exc)) from exc
 
     async def chat_completion(
         self,
@@ -95,49 +118,34 @@ class MiniMaxClient:
         max_output_tokens: Optional[int] = None,
         response_format: Optional[Dict[str, Any]] = None,
         include_reasoning: bool = True,
+        thinking_budget: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Non-streaming chat completion.
-        
-        MiniMax returns reasoning in:
-        - reasoning_details field (array of thinking segments)
-        - <think>...</think> tags in content
-        """
-        # Convert model ID (remove minimax/ prefix if present)
-        actual_model = get_minimax_model_name(model)
-        
-        payload: Dict[str, Any] = {
-            "model": actual_model,
-            "messages": list(messages),
-        }
-        
-        if tools:
-            payload["tools"] = list(tools)
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_output_tokens is not None:
-            payload["max_tokens"] = max_output_tokens
-        if response_format is not None:
-            payload["response_format"] = response_format
+        Non-streaming chat completion via MiniMax Anthropic endpoint.
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            url = f"{self._base_url}/chat/completions"
-            logger.info(f"[MINIMAX] Non-stream request: model={actual_model}, url={url}")
-            logger.info(f"[MINIMAX] Payload messages: {len(payload.get('messages', []))}, tools: {len(payload.get('tools', []) or [])}")
-            logger.debug(f"[MINIMAX] Full payload: {json.dumps(payload, default=str)[:3000]}")
-            
-            response = await client.post(
-                url,
-                headers=self._default_headers(),
-                content=json.dumps(payload),
+        Accepts the same kwargs as the old OpenAI-compat client so
+        callers (chat.py) do not need changes.  The AnthropicClient
+        returns an OpenAI-compatible dict (object="chat.completion").
+        """
+        actual_model = get_minimax_model_name(model)
+        max_tokens = max_output_tokens or 4096
+
+        logger.info(
+            f"[MINIMAX] Non-stream via Anthropic endpoint: "
+            f"model={actual_model}, base_url={self._base_url}"
+        )
+
+        try:
+            return await self._anthropic.chat_completion(
+                messages=messages,
+                model=actual_model,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
             )
-            logger.info(f"[MINIMAX] Response status: {response.status_code}")
-            if response.status_code >= 400:
-                logger.error(f"[MINIMAX] Error response: {response.text[:2000]}")
-            await _raise_for_response(response)
-            data = response.json()
-            logger.info(f"[MINIMAX] Success: id={data.get('id')}, model={data.get('model')}")
-            return data
+        except AnthropicError as exc:
+            raise MiniMaxError(str(exc)) from exc
 
     async def chat_completion_stream(
         self,
@@ -147,108 +155,30 @@ class MiniMaxClient:
         tools: Optional[Iterable[Dict[str, Any]]] = None,
         temperature: Optional[float] = None,
         max_output_tokens: Optional[int] = None,
+        thinking_budget: Optional[int] = None,
     ) -> AsyncIterator[str]:
         """
-        Streaming chat completion.
-        
-        Yields SSE lines in OpenAI-compatible format.
+        Streaming chat completion via MiniMax Anthropic endpoint.
+
+        Yields SSE lines already translated to OpenAI-compatible format
+        by the Anthropic provider.
         """
         actual_model = get_minimax_model_name(model)
-        
-        payload: Dict[str, Any] = {
-            "model": actual_model,
-            "messages": list(messages),
-            "stream": True,
-        }
-        
-        if tools:
-            payload["tools"] = list(tools)
-        if temperature is not None:
-            payload["temperature"] = temperature
-        if max_output_tokens is not None:
-            payload["max_tokens"] = max_output_tokens
+        max_tokens = max_output_tokens or 4096
 
-        async def _iter() -> AsyncIterator[str]:
-            async with httpx.AsyncClient(timeout=None) as client:
-                url = f"{self._base_url}/chat/completions"
-                logger.info(f"[MINIMAX] Stream request: model={actual_model}, url={url}")
-                logger.info(f"[MINIMAX] Stream payload messages: {len(payload.get('messages', []))}, tools: {len(payload.get('tools', []) or [])}")
-                logger.debug(f"[MINIMAX] Stream payload: {json.dumps(payload, default=str)[:3000]}")
-                
-                async with client.stream(
-                    "POST",
-                    url,
-                    headers=self._default_headers(),
-                    content=json.dumps(payload),
-                ) as response:
-                    logger.info(f"[MINIMAX] Stream response status: {response.status_code}")
-                    if response.status_code >= 400:
-                        error_body = await response.aread()
-                        logger.error(f"[MINIMAX] Stream error: {error_body.decode()[:2000]}")
-                    await _raise_for_stream_response(response)
-                    chunk_count = 0
-                    async for line in response.aiter_lines():
-                        if line:
-                            chunk_count += 1
-                            if chunk_count <= 5:
-                                logger.debug(f"[MINIMAX] Stream chunk {chunk_count}: {line[:300]}")
-                            yield line
-                    logger.info(f"[MINIMAX] Stream complete: {chunk_count} chunks")
+        logger.info(
+            f"[MINIMAX] Stream via Anthropic endpoint: "
+            f"model={actual_model}, base_url={self._base_url}"
+        )
 
-        return _iter()
-
-
-async def _raise_for_response(response: httpx.Response) -> None:
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        detail: str
         try:
-            payload = response.json()
-            if isinstance(payload, dict):
-                # MiniMax error format
-                if payload.get("base_resp"):
-                    base_resp = payload["base_resp"]
-                    detail = f"[{base_resp.get('status_code', 'unknown')}] {base_resp.get('status_msg', 'Unknown error')}"
-                elif payload.get("error"):
-                    detail = json.dumps(payload["error"])
-                else:
-                    detail = response.text
-            else:
-                detail = response.text
-        except json.JSONDecodeError:
-            detail = response.text
-        raise MiniMaxError(detail) from exc
-
-
-async def _raise_for_stream_response(response: httpx.Response) -> None:
-    if response.status_code < 400:
-        return
-    detail = f"MiniMax streaming request failed with status {response.status_code}"
-    content_bytes: bytes = b""
-    try:
-        content_bytes = await response.aread()
-    except RuntimeError:
-        raise MiniMaxError(detail)
-    except Exception as exc:
-        raise MiniMaxError(f"{detail}: {exc}") from exc
-
-    if content_bytes:
-        try:
-            payload = json.loads(content_bytes.decode() or "{}")
-            if isinstance(payload, dict):
-                if payload.get("base_resp"):
-                    base_resp = payload["base_resp"]
-                    detail = f"[{base_resp.get('status_code', 'unknown')}] {base_resp.get('status_msg', 'Unknown error')}"
-                elif payload.get("error"):
-                    detail = json.dumps(payload["error"])
-            elif isinstance(payload, str):
-                detail = payload
-            else:
-                detail = content_bytes.decode()
-        except (json.JSONDecodeError, UnicodeDecodeError):
-            decoded = content_bytes.decode(errors="replace").strip()
-            if decoded:
-                detail = decoded
-
-    raise MiniMaxError(detail)
+            return await self._anthropic.chat_completion_stream(
+                messages=messages,
+                model=actual_model,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                thinking_budget=thinking_budget,
+            )
+        except AnthropicError as exc:
+            raise MiniMaxError(str(exc)) from exc

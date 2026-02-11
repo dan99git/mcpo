@@ -47,6 +47,7 @@
     gap: 24px;
     padding: 0 24px;
     justify-content: center;
+    position: relative;
 }
 
 .chat-side {
@@ -55,6 +56,10 @@
     gap: 8px;
     padding-top: 8px;
     flex: 0 0 auto;
+    position: absolute;
+    left: 24px;
+    top: 0;
+    z-index: 10;
 }
 
 .chat-side-left {

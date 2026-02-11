@@ -860,48 +860,36 @@ class GeminiProvider(BaseCompletionProvider):
 
 class MiniMaxProvider(BaseCompletionProvider):
     """
-    OpenAI-compatible MiniMax provider with reasoning_split support.
+    MiniMax provider via the Anthropic Coding Plan endpoint.
+
+    Delegates to the inline AnthropicProvider with MiniMax's
+    Anthropic-compatible base URL (https://api.minimax.io/anthropic).
     """
 
-    def __init__(self, *, base_url: Optional[str], api_key: Optional[str], reasoning_split: Optional[bool] = None) -> None:
+    def __init__(self, *, base_url: Optional[str], api_key: Optional[str]) -> None:
         self.name = "minimax"
-        self.base_url = (base_url or os.getenv("MINIMAX_BASE_URL") or "https://api.minimax.io/v1").rstrip("/")
+        self.base_url = (
+            base_url
+            or os.getenv("MINIMAX_BASE_URL")
+            or "https://api.minimax.io/anthropic"
+        ).rstrip("/")
         self.api_key = api_key or os.getenv("MINIMAX_API_KEY")
         if not self.api_key:
             raise CompletionProviderError("MiniMax API key is required")
-        # default to True per docs; allow env override
-        env_split = os.getenv("MINIMAX_REASONING_SPLIT")
-        self.reasoning_split = reasoning_split if reasoning_split is not None else (
-            env_split.lower() in {"1", "true", "yes", "on"} if env_split else True
-        )
-        self.timeout = 60.0
-
-    def _headers(self) -> Dict[str, str]:
-        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
-
-    def _extra_body(self) -> Dict[str, Any]:
-        extra: Dict[str, Any] = {}
-        # Enable interleaved thinking separation unless explicitly disabled
-        if self.reasoning_split:
-            extra["reasoning_split"] = True
-        return extra
 
     async def complete(self, payload: CompletionRequest) -> Dict[str, Any]:
-        # Reuse OpenAI-compatible helper with MiniMax base URL + reasoning_split
-        delegate = OpenAICompatibleProvider(
-            name="minimax",
+        delegate = AnthropicProvider(
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        return await delegate.complete(payload, extra_body=self._extra_body())
+        return await delegate.complete(payload)
 
     async def stream(self, payload: CompletionRequest) -> AsyncIterator[str]:
-        delegate = OpenAICompatibleProvider(
-            name="minimax",
+        delegate = AnthropicProvider(
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        return await delegate.stream(payload, extra_body=self._extra_body())
+        return await delegate.stream(payload)
 
 
 def _infer_provider(model: str) -> str:

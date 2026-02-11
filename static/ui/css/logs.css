@@ -98,6 +98,8 @@
 .logs-window {
     flex: 1;
     background: #0f172a;
+    overflow: hidden;
+    min-height: 0;  /* Critical for flex child to allow shrinking */
 }
 
 [data-theme="light"] .logs-window {
@@ -107,12 +109,17 @@
 .logs-pane {
     position: relative;
     height: 100%;
+    overflow: hidden;
 }
 
 .logs-output {
-    margin: 0;
-    height: 100%;
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
     overflow-y: auto;
+    overflow-x: hidden;
     padding: 16px;
     font-size: 12px;
     line-height: 1.45;

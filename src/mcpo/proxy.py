@@ -4,8 +4,9 @@ import json
 import logging
 import os
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, AsyncGenerator
 
 import uvicorn
 from fastapi import APIRouter, FastAPI, Request
@@ -138,36 +139,33 @@ def _build_proxy_log_router() -> APIRouter:
 
 
 
-def _register_fastmcp_lifespan_handlers(api_app: FastAPI, fastmcp_apps: list[tuple[FastAPI, str]]) -> None:
-    """Manually orchestrate FastMCP sub-app lifespans so session managers start."""
-
-    if not fastmcp_apps:
-        return
-
+def _create_fastmcp_lifespan(fastmcp_apps: list[tuple[FastAPI, str]]):
+    """
+    Create a lifespan context manager for FastMCP sub-app lifespans.
+    
+    Replaces the deprecated @app.on_event pattern with modern lifespan approach.
+    """
     from contextlib import AsyncExitStack
 
-    @api_app.on_event("startup")
-    async def _start_fastmcp_subapps():
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        # Startup: initialize all FastMCP sub-app lifespans
         stack = AsyncExitStack()
-        api_app.state.fastmcp_lifespan_stack = stack
-        for sub_app, label in fastmcp_apps:
-            try:
-                await stack.enter_async_context(sub_app.router.lifespan_context(sub_app))
-                logger.debug("Started FastMCP lifespan for %s", label)
-            except Exception:
-                logger.exception("Failed to start FastMCP lifespan for %s", label)
-                raise
-
-    @api_app.on_event("shutdown")
-    async def _stop_fastmcp_subapps():
-        stack = getattr(api_app.state, "fastmcp_lifespan_stack", None)
-        if stack is None:
-            return
-        try:
-            await stack.aclose()
-            logger.debug("FastMCP lifespans shut down cleanly")
-        finally:
-            api_app.state.fastmcp_lifespan_stack = None
+        async with stack:
+            for sub_app, label in fastmcp_apps:
+                try:
+                    await stack.enter_async_context(sub_app.router.lifespan_context(sub_app))
+                    logger.debug("Started FastMCP lifespan for %s", label)
+                except Exception:
+                    logger.exception("Failed to start FastMCP lifespan for %s", label)
+                    raise
+            
+            yield  # Application runs here
+            
+            # Shutdown handled automatically by AsyncExitStack.__aexit__
+            logger.debug("FastMCP lifespans shutting down")
+    
+    return lifespan
 
 
 # OpenHubUI MCP server removed - now using OpenAPI endpoints only
@@ -245,8 +243,13 @@ async def run_proxy(
     cfg = MCPConfig.from_dict(raw_cfg)
     proxy = FastMCP.as_proxy(cfg)
 
-    api_app = FastAPI()
+    # Prepare shared list for FastMCP sub-apps (populated during mount loop)
     fastmcp_apps: list[tuple[FastAPI, str]] = []
+    
+    # Create lifespan context manager that references fastmcp_apps
+    lifespan = _create_fastmcp_lifespan(fastmcp_apps)
+    
+    api_app = FastAPI(lifespan=lifespan)
     # Allow cross-origin requests for browser-based clients (e.g., OpenWebUI)
     api_app.add_middleware(
         CORSMiddleware,
@@ -382,7 +385,8 @@ async def run_proxy(
             logger.warning("Mount path %s already in use; skipping for '%s'", root_mount_path, server_name)
 
     api_app.state.proxy_mounts = proxy_mounts
-    _register_fastmcp_lifespan_handlers(api_app, fastmcp_apps)
+    # Note: FastMCP lifespan handlers are now managed via the lifespan context manager
+    # passed to FastAPI() at construction time - no separate registration needed
     api_app.include_router(_build_proxy_log_router())
 
     config = uvicorn.Config(

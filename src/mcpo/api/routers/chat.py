@@ -14,6 +14,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, Field
 from starlette.routing import Mount
 
+from mcpo.providers.google import GoogleClient, GoogleError, is_google_model
 from mcpo.providers.openrouter import OpenRouterClient, OpenRouterError
 from mcpo.providers.minimax import MiniMaxClient, MiniMaxError, get_minimax_models, is_minimax_model
 from mcpo.services.chat_sessions import ChatSession, ChatSessionManager, ChatStep, get_chat_session_manager
@@ -71,8 +72,8 @@ def _sanitize_tool_calls_in_messages(messages: Iterable[Dict[str, Any]]) -> List
 router = APIRouter(tags=["chat"], prefix="/sessions")
 
 # Type alias for provider clients
-ChatClient = Union[OpenRouterClient, MiniMaxClient]
-ProviderError = Union[OpenRouterError, MiniMaxError]
+ChatClient = Union[OpenRouterClient, MiniMaxClient, GoogleClient]
+ProviderError = Union[OpenRouterError, MiniMaxError, GoogleError]
 
 
 def _get_client_for_model(model: str) -> ChatClient:
@@ -86,6 +87,8 @@ def _get_client_for_model(model: str) -> ChatClient:
     """
     if is_minimax_model(model):
         return MiniMaxClient()
+    if is_google_model(model):
+        return GoogleClient()
     return OpenRouterClient()
 
 
@@ -149,6 +152,36 @@ async def _fetch_openai_models() -> List[Dict[str, str]]:
         return []
 
 
+async def _fetch_google_models() -> List[Dict[str, str]]:
+    """Fetch Google/Gemini model catalog when GOOGLE_API_KEY is present."""
+    api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return []
+    base_url = os.getenv("GOOGLE_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
+    url = f"{base_url}/v1beta/models"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, params={"key": api_key})
+            resp.raise_for_status()
+            payload = resp.json()
+            data = payload.get("models") or []
+            models: List[Dict[str, str]] = []
+            for entry in data:
+                full_name = entry.get("name", "")
+                model_id = full_name.replace("models/", "") if full_name.startswith("models/") else full_name
+                if not model_id:
+                    continue
+                supported = entry.get("supportedGenerationMethods") or []
+                if "generateContent" not in supported:
+                    continue
+                display = entry.get("displayName") or model_id
+                models.append({"id": model_id, "label": f"Google: {display}"})
+            return models
+    except Exception as exc:  # pragma: no cover - network errors
+        logger.warning("Google model discovery failed: %s", exc)
+        return []
+
+
 async def _load_model_catalog() -> List[Dict[str, str]]:
     """
     Build model catalog from all available providers:
@@ -200,6 +233,13 @@ async def _load_model_catalog() -> List[Dict[str, str]]:
     # Add OpenAI models if API key present
     openai_models = await _fetch_openai_models()
     for model in openai_models:
+        if model["id"] not in existing:
+            combined.append(model)
+            existing.add(model["id"])
+
+    # Add Google/Gemini models if API key present
+    google_models = await _fetch_google_models()
+    for model in google_models:
         if model["id"] not in existing:
             combined.append(model)
             existing.add(model["id"])
@@ -628,9 +668,12 @@ async def _perform_exchange(
             step.detail.setdefault("toolCalls", [])
             for tool_call in tool_calls:
                 tc_func = tool_call.get('function', {})
-                logger.info(f"[CHAT] Processing tool_call: id={tool_call.get('id')}, name={tc_func.get('name')}, args={tc_func.get('arguments')}")
+                tc_id = tool_call.get('id')
+                tc_name = tc_func.get('name')
+                logger.info(f"[TOOL_EVENT] Processing tool_call: id={tc_id}, name={tc_name}")
                 step.detail["toolCalls"].append(tool_call)
                 if emitter:
+                    logger.info(f"[TOOL_EVENT] Emitting tool.call.started: id={tc_id}")
                     await emitter("tool.call.started", toolCall=tool_call)
                 output = await _execute_tool(
                     session,
@@ -639,6 +682,7 @@ async def _perform_exchange(
                     tool_timeout,
                     tool_timeout_max,
                 )
+                logger.info(f"[TOOL_EVENT] Tool execution complete: id={tc_id}, output_type={type(output).__name__}")
                 tool_func = tool_call.get("function", {})
                 tool_name = tool_func.get("name") or tool_call.get("name")
                 tool_message = {
@@ -649,8 +693,11 @@ async def _perform_exchange(
                 }
                 session.messages.append(tool_message)
                 if emitter:
-                    await emitter("tool.call.result", toolCall={**tool_call, "result": output})
+                    result_payload = {**tool_call, "result": output}
+                    logger.info(f"[TOOL_EVENT] Emitting tool.call.result: id={tc_id}, has_result={output is not None}")
+                    await emitter("tool.call.result", toolCall=result_payload)
             if emitter:
+                logger.info(f"[TOOL_EVENT] Emitting step.completed with status=tools_executed")
                 await emitter("step.completed", step=step.to_dict(), status="tools_executed")
             continue
 
@@ -724,6 +771,7 @@ async def _call_provider(
         extra_kwargs["include_reasoning"] = payload.include_reasoning
         extra_kwargs["reasoning_effort"] = payload.reasoning_effort
 
+    logger.info(f"[COMPLETION] Non-streaming call to {session.model}")
     response = await client.chat_completion(
         messages=messages,
         model=session.model,
@@ -732,6 +780,7 @@ async def _call_provider(
         max_output_tokens=payload.max_output_tokens,
         **extra_kwargs,
     )
+    logger.info(f"[COMPLETION] Response received, choices={len(response.get('choices', []))}")
     return _interpret_completion(response)
 
 
@@ -759,6 +808,8 @@ async def _call_provider_stream(
         max_output_tokens=payload.max_output_tokens,
         **stream_kwargs,
     )
+    
+    logger.info(f"[STREAM] Starting stream for model={model}")
 
     content_parts: List[str] = []
     reasoning_parts: List[str] = []
@@ -768,6 +819,7 @@ async def _call_provider_stream(
     role: Optional[str] = None
     in_think_tag = False
     think_buffer = ""
+    chunk_count = 0
 
     async for line in iterator:
         line = line.strip()
@@ -778,10 +830,16 @@ async def _call_provider_stream(
         else:
             data = line
         if data == "[DONE]":
+            logger.info(f"[STREAM] Received [DONE] after {chunk_count} chunks")
             break
         try:
             payload_obj = json.loads(data)
+            chunk_count += 1
+            # Log first few chunks and periodically for visibility
+            if chunk_count <= 3 or chunk_count % 25 == 0:
+                logger.info(f"[STREAM] Chunk #{chunk_count}: {json.dumps(payload_obj)[:300]}")
         except json.JSONDecodeError:
+            logger.warning(f"[STREAM] Failed to parse chunk: {data[:200]}")
             continue
         choices = payload_obj.get("choices", [])
         for choice in choices:
@@ -950,6 +1008,8 @@ async def _call_provider_stream(
         for tc in tool_call_list:
             logger.info(f"[STREAM] tool_call: id={tc['id']}, name={tc['function']['name']}, args={tc['function']['arguments'][:100]}...")
         assistant_message["tool_calls"] = tool_call_list
+    
+    logger.info(f"[STREAM] Complete: {chunk_count} chunks, content_len={len(clean_content)}, reasoning_len={len(full_reasoning)}, tool_calls={len(tool_call_list)}, finish_reason={finish_reason}")
     
     return {
         "message": assistant_message,
