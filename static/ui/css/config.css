@@ -95,6 +95,65 @@
     font-size: 12px;
 }
 
+/* Folder headers */
+
+.sk-folder-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    margin-top: 4px;
+    border-radius: 6px;
+    cursor: pointer;
+    user-select: none;
+    transition: background 0.12s;
+}
+
+.sk-folder-header:first-child {
+    margin-top: 0;
+}
+
+.sk-folder-header:hover {
+    background: var(--hover);
+}
+
+.sk-folder-chevron {
+    font-size: 9px;
+    color: var(--text-secondary);
+    width: 12px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.sk-folder-icon {
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.sk-folder-name {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex: 1;
+    min-width: 0;
+}
+
+.sk-folder-count {
+    font-size: 10px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    padding: 1px 7px;
+    flex-shrink: 0;
+}
+
+/* Skill cards */
+
 .sk-card {
     display: flex;
     align-items: center;
@@ -104,6 +163,10 @@
     border: 1px solid transparent;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
+}
+
+.sk-card.sk-card-nested {
+    margin-left: 18px;
 }
 
 .sk-card:hover {
@@ -136,6 +199,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
     margin-top: 2px;
+}
+
+.sk-card-folder-badge {
+    display: inline-block;
+    font-size: 9px;
+    color: var(--text-secondary);
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 1px 5px;
+    margin-top: 3px;
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
 }
 
 /* Editor panel */

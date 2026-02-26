@@ -293,6 +293,7 @@ async def list_agent_skills():
                 "models": item.models or [],
                 "tags": item.tags or [],
                 "sourcePath": item.source_path,
+                "folder": item.folder,
             }
             for item in skills
         ],
@@ -321,6 +322,7 @@ async def get_agent_skill(skill_id: str):
             "models": skill.models or [],
             "tags": skill.tags or [],
             "sourcePath": skill.source_path,
+            "folder": skill.folder,
         },
     }
 

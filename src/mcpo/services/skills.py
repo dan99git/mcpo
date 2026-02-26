@@ -25,6 +25,7 @@ class SkillDefinition:
     models: List[str] | None = None
     tags: List[str] | None = None
     source_path: str | None = None
+    folder: str = ""
 
 
 def _skills_dir() -> Path:
@@ -77,7 +78,7 @@ def _safe_skill_id(value: str) -> str:
     return sid or "skill"
 
 
-def _build_skill_from_file(path: Path) -> Optional[SkillDefinition]:
+def _build_skill_from_file(path: Path, root: Path | None = None) -> Optional[SkillDefinition]:
     if not path.exists() or not path.is_file():
         return None
     raw = path.read_text(encoding="utf-8")
@@ -102,6 +103,16 @@ def _build_skill_from_file(path: Path) -> Optional[SkillDefinition]:
     providers = _parse_list_value(meta.get("providers"))
     models = _parse_list_value(meta.get("models"))
     tags = _parse_list_value(meta.get("tags"))
+
+    # Compute folder relative to skills root
+    folder = ""
+    if root:
+        try:
+            rel = path.parent.relative_to(root)
+            folder = str(rel) if str(rel) != "." else ""
+        except ValueError:
+            folder = ""
+
     return SkillDefinition(
         id=sid,
         title=title,
@@ -114,6 +125,7 @@ def _build_skill_from_file(path: Path) -> Optional[SkillDefinition]:
         models=models or None,
         tags=tags or None,
         source_path=str(path),
+        folder=folder,
     )
 
 
@@ -125,13 +137,13 @@ def list_skills() -> List[SkillDefinition]:
     seen_ids: set[str] = set()
     # Scan flat *.md files at root level
     for path in sorted(root.glob("*.md")):
-        skill = _build_skill_from_file(path)
+        skill = _build_skill_from_file(path, root=root)
         if skill and skill.id not in seen_ids:
             skills.append(skill)
             seen_ids.add(skill.id)
-    # Scan subfolder/SKILL.md pattern (e.g. .claude/skills/serve/SKILL.md)
+    # Scan subfolder/SKILL.md pattern (e.g. data/skills/serve/SKILL.md)
     for path in sorted(root.glob("*/SKILL.md")):
-        skill = _build_skill_from_file(path)
+        skill = _build_skill_from_file(path, root=root)
         if skill and skill.id not in seen_ids:
             skills.append(skill)
             seen_ids.add(skill.id)
