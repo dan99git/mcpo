@@ -232,6 +232,27 @@
                                     <label class="sk-label" for="skills-description-input">Description</label>
                                     <textarea id="skills-description-input" class="sk-input sk-textarea-sm" placeholder="Brief description of what this skill does"></textarea>
                                 </div>
+                                <div class="sk-field-row">
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-priority-input">Priority</label>
+                                        <input id="skills-priority-input" class="sk-input" type="number" value="100" min="0" max="999" />
+                                    </div>
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-scopes-input">Scopes <span class="sk-label-hint">(comma-separated)</span></label>
+                                        <input id="skills-scopes-input" class="sk-input" placeholder="chat, completions" />
+                                    </div>
+                                </div>
+                                <div class="sk-field-row">
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-providers-input">Providers <span class="sk-label-hint">(optional filter)</span></label>
+                                        <input id="skills-providers-input" class="sk-input" placeholder="e.g. anthropic, openai" />
+                                    </div>
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-models-input">Models <span class="sk-label-hint">(optional filter)</span></label>
+                                        <input id="skills-models-input" class="sk-input" placeholder="e.g. claude-*, gpt-4o" />
+                                    </div>
+                                </div>
+                                <div class="sk-source-path" id="skills-source-path"></div>
                                 <div class="sk-field-group sk-field-grow">
                                     <label class="sk-label" for="skills-content-input">Content <span class="sk-label-hint">(Markdown)</span></label>
                                     <textarea id="skills-content-input" class="sk-input sk-textarea-lg" placeholder="Skill markdown content — this is injected into system prompts"></textarea>

@@ -28,7 +28,7 @@ class SkillDefinition:
 
 
 def _skills_dir() -> Path:
-    configured = (os.getenv("MCPO_SKILLS_DIR") or "skills").strip()
+    configured = (os.getenv("MCPO_SKILLS_DIR") or "data/skills").strip()
     return Path(configured).resolve()
 
 
@@ -82,8 +82,16 @@ def _build_skill_from_file(path: Path) -> Optional[SkillDefinition]:
         return None
     raw = path.read_text(encoding="utf-8")
     meta, body = _parse_frontmatter(raw)
-    sid = _safe_skill_id(str(meta.get("id") or path.stem))
-    title = str(meta.get("title") or sid)
+    # Support both "id" and "name" frontmatter keys; fall back to parent dir
+    # name (for subfolder/SKILL.md) or file stem (for flat .md files).
+    raw_id = meta.get("id") or meta.get("name")
+    if not raw_id:
+        if path.name.upper() == "SKILL.MD":
+            raw_id = path.parent.name
+        else:
+            raw_id = path.stem
+    sid = _safe_skill_id(str(raw_id))
+    title = str(meta.get("title") or meta.get("name") or sid)
     description = str(meta.get("description") or "")
     enabled = _to_bool(meta.get("enabled"), default=True)
     try:
@@ -114,10 +122,19 @@ def list_skills() -> List[SkillDefinition]:
     if not root.exists():
         return []
     skills: List[SkillDefinition] = []
+    seen_ids: set[str] = set()
+    # Scan flat *.md files at root level
     for path in sorted(root.glob("*.md")):
         skill = _build_skill_from_file(path)
-        if skill:
+        if skill and skill.id not in seen_ids:
             skills.append(skill)
+            seen_ids.add(skill.id)
+    # Scan subfolder/SKILL.md pattern (e.g. .claude/skills/serve/SKILL.md)
+    for path in sorted(root.glob("*/SKILL.md")):
+        skill = _build_skill_from_file(path)
+        if skill and skill.id not in seen_ids:
+            skills.append(skill)
+            seen_ids.add(skill.id)
     state = get_state_manager()
     states = state.get_all_skill_states()
     for skill in skills:
@@ -136,39 +153,74 @@ def get_skill(skill_id: str) -> Optional[SkillDefinition]:
     return None
 
 
-def upsert_skill_file(*, skill_id: str, title: str, description: str, content: str) -> SkillDefinition:
+def upsert_skill_file(
+    *,
+    skill_id: str,
+    title: str,
+    description: str,
+    content: str,
+    priority: int = 100,
+    scopes: Optional[List[str]] = None,
+    providers: Optional[List[str]] = None,
+    models: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+) -> SkillDefinition:
     sid = _safe_skill_id(skill_id)
     root = _skills_dir()
-    root.mkdir(parents=True, exist_ok=True)
-    path = root / f"{sid}.md"
-    payload = "\n".join(
-        [
-            "---",
-            f"id: {sid}",
-            f"title: {title or sid}",
-            f"description: {description or ''}",
-            "enabled: true",
-            "priority: 100",
-            "scopes: [chat, completions]",
-            "---",
-            (content or "").rstrip(),
-            "",
-        ]
-    )
-    path.write_text(payload, encoding="utf-8")
-    skill = _build_skill_from_file(path)
+
+    # Check if skill already exists (flat or subfolder) and update in place
+    existing_path = root / f"{sid}.md"
+    subfolder_path = root / sid / "SKILL.md"
+    if subfolder_path.exists():
+        existing_path = subfolder_path
+    elif not existing_path.exists():
+        # New skill: create as subfolder/SKILL.md
+        existing_path = subfolder_path
+
+    existing_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build frontmatter lines
+    fm_lines = [
+        "---",
+        f"name: {sid}",
+        f"description: {description or ''}",
+    ]
+    if priority != 100:
+        fm_lines.append(f"priority: {priority}")
+    if scopes:
+        fm_lines.append(f"scopes: [{', '.join(scopes)}]")
+    if providers:
+        fm_lines.append(f"providers: [{', '.join(providers)}]")
+    if models:
+        fm_lines.append(f"models: [{', '.join(models)}]")
+    if tags:
+        fm_lines.append(f"tags: [{', '.join(tags)}]")
+    fm_lines.append("---")
+
+    payload = "\n".join(fm_lines) + "\n" + (content or "").rstrip() + "\n"
+    existing_path.write_text(payload, encoding="utf-8")
+    skill = _build_skill_from_file(existing_path)
     if not skill:
         raise ValueError(f"Failed to load saved skill: {sid}")
     return skill
 
 
 def delete_skill_file(skill_id: str) -> bool:
+    import shutil
+
     sid = _safe_skill_id(skill_id)
-    path = _skills_dir() / f"{sid}.md"
-    if not path.exists():
-        return False
-    path.unlink()
-    return True
+    root = _skills_dir()
+    # Try flat file first
+    flat = root / f"{sid}.md"
+    if flat.exists():
+        flat.unlink()
+        return True
+    # Try subfolder
+    subfolder = root / sid
+    if subfolder.is_dir():
+        shutil.rmtree(subfolder)
+        return True
+    return False
 
 
 def _matches_scope(skill: SkillDefinition, scope: str) -> bool:

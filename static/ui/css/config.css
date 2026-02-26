@@ -266,6 +266,24 @@
     line-height: 1.5;
 }
 
+.sk-field-row {
+    display: flex;
+    gap: 12px;
+}
+
+.sk-field-half {
+    flex: 1;
+    min-width: 0;
+}
+
+.sk-source-path {
+    font-size: 11px;
+    color: var(--text-secondary);
+    font-family: 'SF Mono', Monaco, Consolas, monospace;
+    padding: 4px 0;
+    word-break: break-all;
+}
+
 @media (max-width: 768px) {
     .sk-layout {
         flex-direction: column;

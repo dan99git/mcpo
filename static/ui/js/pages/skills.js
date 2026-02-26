@@ -19,8 +19,23 @@ function getSkillsElements() {
         idInput: document.getElementById('skills-id-input'),
         titleInput: document.getElementById('skills-title-input'),
         descInput: document.getElementById('skills-description-input'),
+        priorityInput: document.getElementById('skills-priority-input'),
+        scopesInput: document.getElementById('skills-scopes-input'),
+        providersInput: document.getElementById('skills-providers-input'),
+        modelsInput: document.getElementById('skills-models-input'),
+        sourcePath: document.getElementById('skills-source-path'),
         contentInput: document.getElementById('skills-content-input'),
     };
+}
+
+// --- Helpers ---
+
+function csvToArray(str) {
+    return (str || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function arrayToCsv(arr) {
+    return (arr || []).join(', ');
 }
 
 // --- List rendering ---
@@ -87,9 +102,22 @@ async function selectSkill(skillId) {
     els.idInput.readOnly = true;
     els.titleInput.value = skill.title || '';
     els.descInput.value = skill.description || '';
+    els.priorityInput.value = skill.priority ?? 100;
+    els.scopesInput.value = arrayToCsv(skill.scopes);
+    els.providersInput.value = arrayToCsv(skill.providers);
+    els.modelsInput.value = arrayToCsv(skill.models);
     els.contentInput.value = skill.content || '';
     els.editorMode.textContent = 'Editing';
     els.deleteBtn.style.display = '';
+
+    if (els.sourcePath) {
+        if (skill.sourcePath) {
+            els.sourcePath.textContent = skill.sourcePath;
+            els.sourcePath.style.display = '';
+        } else {
+            els.sourcePath.style.display = 'none';
+        }
+    }
 }
 
 function startNewSkill() {
@@ -103,9 +131,14 @@ function startNewSkill() {
     els.idInput.readOnly = false;
     els.titleInput.value = '';
     els.descInput.value = '';
+    els.priorityInput.value = 100;
+    els.scopesInput.value = 'chat, completions';
+    els.providersInput.value = '';
+    els.modelsInput.value = '';
     els.contentInput.value = '';
     els.editorMode.textContent = 'New Skill';
     els.deleteBtn.style.display = 'none';
+    if (els.sourcePath) els.sourcePath.style.display = 'none';
     els.idInput.focus();
 }
 
@@ -138,11 +171,18 @@ async function toggleSkillEnabled(skillId, enabled, toggleEl) {
 async function saveSkillFromEditor() {
     const els = getSkillsElements();
     if (!els.idInput) return;
+    const scopes = csvToArray(els.scopesInput.value);
+    const providers = csvToArray(els.providersInput.value);
+    const models = csvToArray(els.modelsInput.value);
     const payload = {
         id: (els.idInput.value || '').trim(),
         title: (els.titleInput.value || '').trim(),
         description: (els.descInput.value || '').trim(),
         content: els.contentInput.value || '',
+        priority: parseInt(els.priorityInput.value, 10) || 100,
+        scopes: scopes.length ? scopes : null,
+        providers: providers.length ? providers : null,
+        models: models.length ? models : null,
     };
     if (!payload.id || !payload.title || !payload.content.trim()) {
         alert('ID, title, and content are required.');
