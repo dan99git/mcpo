@@ -49,6 +49,7 @@ from mcpo.api.routers.health import (
     _update_health_snapshot,
     register_health_endpoint as _register_health_endpoint,
 )
+from mcpo.api.routers.tools import create_dynamic_endpoints
 
 # MCP protocol version (used for outbound remote connections headers)
 MCP_VERSION = "2025-06-18"
@@ -410,81 +411,6 @@ async def initialize_sub_app(sub_app: FastAPI):
     except Exception:
         sub_app.state.is_connected = False
         raise
-
-
-async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
-    session: ClientSession = app.state.session
-    if not session:
-        raise ValueError("Session is not initialized in the app state.")
-
-    result = await session.initialize()
-    server_info = getattr(result, "serverInfo", None)
-    if server_info:
-        app.title = server_info.name or app.title
-        app.description = (
-            f"{server_info.name} MCP Server" if server_info.name else app.description
-        )
-        app.version = server_info.version or app.version
-
-    instructions = getattr(result, "instructions", None)
-    if instructions:
-        app.description = instructions
-
-    tools_result = await session.list_tools()
-    tools = tools_result.tools
-
-    # Filter out disabled tools configured for this server
-    disabled_tools = getattr(app.state, "disabled_tools", [])
-    if disabled_tools:
-        original_count = len(tools)
-        tools = [tool for tool in tools if tool.name not in disabled_tools]
-        filtered_count = original_count - len(tools)
-        if filtered_count > 0:
-            logger.info(
-                f"Filtered out {filtered_count} tool(s) for server '{app.title}': {disabled_tools}"
-            )
-
-    # Prefer config key from state to ensure uniqueness across servers
-    server_key = getattr(app.state, "config_key", None) or (app.title or "server").replace(" ", "_")
-
-    for tool in tools:
-        endpoint_name = tool.name
-        endpoint_description = tool.description
-
-        inputSchema = tool.inputSchema
-        outputSchema = getattr(tool, "outputSchema", None)
-
-        form_model_fields = get_model_fields(
-            f"{endpoint_name}_form_model",
-            inputSchema.get("properties", {}),
-            inputSchema.get("required", []),
-            inputSchema.get("$defs", {}),
-        )
-
-        response_model_fields = None
-        if outputSchema:
-            response_model_fields = get_model_fields(
-                f"{endpoint_name}_response_model",
-                outputSchema.get("properties", {}),
-                outputSchema.get("required", []),
-                outputSchema.get("$defs", {}),
-            )
-
-        tool_handler = get_tool_handler(
-            session,
-            endpoint_name,
-            form_model_fields,
-            response_model_fields,
-        )
-
-        app.post(
-            f"/{endpoint_name}",
-            summary=endpoint_name.replace("_", " ").title(),
-            description=endpoint_description,
-            response_model_exclude_none=True,
-            operation_id=f"{server_key}.{endpoint_name}",
-            dependencies=[Depends(api_dependency)] if api_dependency else [],
-        )(tool_handler)
 
 
 @asynccontextmanager
