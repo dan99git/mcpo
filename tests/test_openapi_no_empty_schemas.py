@@ -41,6 +41,9 @@ def test_no_empty_object_response_schemas_in_aggregate_openapi():
 
     from mcpo.main import build_main_app
 
+    if not os.path.exists("mcpo.json"):
+        pytest.skip("mcpo.json not present in working dir; integration config required")
+
     app = asyncio.run(build_main_app(config_path="mcpo.json", api_key=api_key))
     client = TestClient(app)
 

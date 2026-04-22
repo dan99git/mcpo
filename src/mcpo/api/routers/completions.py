@@ -894,7 +894,8 @@ class MiniMaxProvider(BaseCompletionProvider):
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        return await delegate.stream(payload)
+        async for chunk in delegate.stream(payload):
+            yield chunk
 
 
 def _infer_provider(model: str) -> str:
@@ -957,6 +958,7 @@ def _resolve_provider(payload: CompletionRequest) -> BaseCompletionProvider:
             api_key=payload.api_key,
         )
 
+    raise CompletionProviderError(f"Unknown provider: {provider!r}")
 
 
 async def _sse(stream: AsyncIterator[str]) -> AsyncIterator[str]:
