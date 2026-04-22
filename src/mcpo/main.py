@@ -44,6 +44,11 @@ from mcpo.services.logging_handlers import BufferedLogHandler
 from mcpo.api.routers.admin import _mount_or_remount_fastmcp, router as admin_router
 from mcpo.api.routers.chat import router as chat_router
 from mcpo.api.routers.completions import router as completions_router
+from mcpo.api.routers.health import (
+    _health_state,
+    _update_health_snapshot,
+    register_health_endpoint as _register_health_endpoint,
+)
 
 # MCP protocol version (used for outbound remote connections headers)
 MCP_VERSION = "2025-06-18"
@@ -65,44 +70,10 @@ def error_envelope(message: str, code: str | None = None, data: Any | None = Non
 # Global reload lock to ensure atomic config reloads
 _reload_lock = asyncio.Lock()
 
-# Global health snapshot
-_health_state: Dict[str, Any] = {
-    "generation": 0,
-    "last_reload": None,
-    "servers": {},  # name -> {connected: bool, type: str}
-}
-
 # Global log buffer for UI display (mirrors centralized log manager)
 _log_buffer: list[dict] = []
 _log_buffer_lock = threading.Lock()
 MAX_LOG_ENTRIES = 2000
-
-
-def _update_health_snapshot(app: FastAPI):
-    """Recompute health snapshot based on mounted sub apps."""
-    servers = {}
-    for route in app.router.routes:
-        if isinstance(route, Mount) and isinstance(route.app, FastAPI):
-            sub_app = route.app
-            servers[sub_app.title] = {
-                "connected": bool(getattr(sub_app.state, "is_connected", False)),
-                "type": getattr(sub_app.state, "server_type", "unknown"),
-            }
-    _health_state["servers"] = servers
-
-
-def _register_health_endpoint(app: FastAPI):
-    @app.get("/healthz")
-    async def healthz():  # noqa: D401
-        """Basic health & connectivity info."""
-        # Update on demand to reflect latest connection flags
-        _update_health_snapshot(app)
-        return {
-            "status": "ok",
-            "generation": _health_state["generation"],
-            "lastReload": _health_state["last_reload"],
-            "servers": _health_state["servers"],
-        }
 
 
 class GracefulShutdown:
