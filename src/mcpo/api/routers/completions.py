@@ -898,12 +898,127 @@ class MiniMaxProvider(BaseCompletionProvider):
             yield chunk
 
 
+class _DualModeProvider(BaseCompletionProvider):
+    """Base for providers that support both Anthropic-compat and OpenAI-compat modes.
+
+    Subclasses set `name`, `api_key`, `base_url`, and `_mode` ("anthropic"|"openai")
+    and everything else is delegation.
+    """
+
+    name: str = "dual-mode"
+    api_key: Optional[str] = None
+    base_url: str = ""
+    _mode: str = "openai"
+
+    def _delegate(self) -> BaseCompletionProvider:
+        if self._mode == "anthropic":
+            return AnthropicProvider(base_url=self.base_url, api_key=self.api_key)
+        return OpenAICompatibleProvider(self.name, base_url=self.base_url, api_key=self.api_key)
+
+    async def complete(self, payload: CompletionRequest) -> Dict[str, Any]:
+        return await self._delegate().complete(payload)
+
+    async def stream(self, payload: CompletionRequest) -> AsyncIterator[str]:
+        async for chunk in self._delegate().stream(payload):
+            yield chunk
+
+
+class KimiProvider(_DualModeProvider):
+    """
+    Kimi (Moonshot) provider with selectable endpoint mode.
+
+    Mirrors the dual-mode design in mcpo.providers.kimi: toggled by
+    KIMI_USE_CODING_PLAN_ENDPOINT (default OFF → OpenAI-compatible).
+    Honors KIMI_BASE_URL / KIMI_CODING_PLAN_BASE_URL / KIMI_REGULAR_BASE_URL
+    for mode-specific overrides.
+    """
+
+    def __init__(self, *, base_url: Optional[str], api_key: Optional[str]) -> None:
+        self.name = "kimi"
+        self.api_key = api_key or os.getenv("KIMI_API_KEY") or os.getenv("MOONSHOT_API_KEY")
+        if not self.api_key:
+            raise CompletionProviderError(
+                "Kimi API key is required (set KIMI_API_KEY or MOONSHOT_API_KEY)"
+            )
+
+        use_coding_plan = _truthy_env("KIMI_USE_CODING_PLAN_ENDPOINT", default=False)
+        if use_coding_plan:
+            self._mode = "anthropic"
+            default_url = "https://api.moonshot.ai/anthropic"
+            self.base_url = (
+                base_url
+                or os.getenv("KIMI_CODING_PLAN_BASE_URL")
+                or os.getenv("KIMI_BASE_URL")
+                or default_url
+            ).rstrip("/")
+        else:
+            self._mode = "openai"
+            default_url = "https://api.moonshot.ai/v1"
+            self.base_url = (
+                base_url
+                or os.getenv("KIMI_REGULAR_BASE_URL")
+                or os.getenv("KIMI_BASE_URL")
+                or default_url
+            ).rstrip("/")
+
+
+class GLMProvider(_DualModeProvider):
+    """
+    GLM (Zhipu) provider with selectable endpoint mode.
+
+    Mirrors the dual-mode design in mcpo.providers.glm: toggled by
+    GLM_USE_CODING_PLAN_ENDPOINT (default ON → Anthropic-compatible).
+    Honors GLM_BASE_URL / GLM_CODING_PLAN_BASE_URL / GLM_REGULAR_BASE_URL.
+    """
+
+    def __init__(self, *, base_url: Optional[str], api_key: Optional[str]) -> None:
+        self.name = "glm"
+        self.api_key = api_key or os.getenv("GLM_API_KEY") or os.getenv("ZHIPU_API_KEY")
+        if not self.api_key:
+            raise CompletionProviderError(
+                "GLM API key is required (set GLM_API_KEY or ZHIPU_API_KEY)"
+            )
+
+        use_coding_plan = _truthy_env("GLM_USE_CODING_PLAN_ENDPOINT", default=True)
+        if use_coding_plan:
+            self._mode = "anthropic"
+            default_url = "https://open.bigmodel.cn/api/anthropic"
+            self.base_url = (
+                base_url
+                or os.getenv("GLM_CODING_PLAN_BASE_URL")
+                or os.getenv("GLM_BASE_URL")
+                or default_url
+            ).rstrip("/")
+        else:
+            self._mode = "openai"
+            default_url = "https://open.bigmodel.cn/api/paas/v4"
+            self.base_url = (
+                base_url
+                or os.getenv("GLM_REGULAR_BASE_URL")
+                or os.getenv("GLM_BASE_URL")
+                or default_url
+            ).rstrip("/")
+
+
+def _truthy_env(name: str, *, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _infer_provider(model: str) -> str:
     m = model.lower()
     if m.startswith("claude") or "anthropic" in m:
         return "anthropic"
     if m.startswith("gemini") or "google" in m:
         return "gemini"
+    # Our own kimi/glm namespaces (prefix-only, not substring — so OpenRouter
+    # vendor-prefixed models like "moonshotai/kimi-k2:free" don't get swept up).
+    if m.startswith("kimi/") or m.startswith("moonshot/"):
+        return "kimi"
+    if m.startswith("glm/") or m.startswith("glm-") or m.startswith("zhipu/"):
+        return "glm"
     if m.startswith("openrouter") or m.startswith("router"):
         return "openrouter"
     if "minimax" in m or m.startswith("m2") or "m2" in m:
@@ -957,6 +1072,14 @@ def _resolve_provider(payload: CompletionRequest) -> BaseCompletionProvider:
             base_url=payload.base_url,
             api_key=payload.api_key,
         )
+
+    if provider in {"kimi", "moonshot"}:
+        logger.info(f"[COMPLETIONS] Creating KimiProvider")
+        return KimiProvider(base_url=payload.base_url, api_key=payload.api_key)
+
+    if provider in {"glm", "zhipu"}:
+        logger.info(f"[COMPLETIONS] Creating GLMProvider")
+        return GLMProvider(base_url=payload.base_url, api_key=payload.api_key)
 
     raise CompletionProviderError(f"Unknown provider: {provider!r}")
 
