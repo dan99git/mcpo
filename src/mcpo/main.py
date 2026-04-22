@@ -1789,6 +1789,14 @@ async def build_main_app(
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to save requirements", data=str(e), code="io_error"))
 
+    # Mount the meta router AFTER all inline /_meta decorators so that on
+    # overlapping paths the inline handlers (registered first) win. Only
+    # meta.py's unique endpoints become live: /logs/categorized,
+    # /logs/clear/{category}, /logs/clear/all, /install-dependencies,
+    # /status, /stats, /aggregate_openapi.
+    from mcpo.api.routers.meta import router as meta_router
+    main_app.include_router(meta_router, prefix="/_meta")
+
     # Create internal MCPO MCP server for self-management tools (mounted under /mcpo)
     mcpo_app = await create_internal_mcpo_server(main_app, api_dependency)
     main_app.mount("/mcpo", mcpo_app, name="mcpo")
