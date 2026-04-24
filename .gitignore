@@ -43,3 +43,4 @@ Desktop.ini
 # Logs
 *.log
 logs/
+temp_openapi.json

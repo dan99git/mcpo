@@ -2,13 +2,13 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
-import threading
-import copy
 import hashlib
 from datetime import datetime
 from typing import Dict, Any, Optional
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from fastapi import APIRouter, Request
@@ -24,20 +24,34 @@ from mcpo.services.logging import get_log_manager
 from mcpo.services.runner import get_runner_service
 from mcpo.services.metrics import get_metrics_aggregator
 
-# Import remaining dependencies from main (to be phased out)
+# Health snapshot helpers (owned by routers.health)
+from mcpo.api.routers.health import _health_state, _update_health_snapshot
+
+# Main-module helpers that still live in mcpo.main
 from mcpo.main import (
     load_config,
     reload_config_handler,
     _mount_or_remount_fastmcp,
     unmount_servers,
     create_sub_app,
+    validate_server_config,
     error_envelope,
     MCP_VERSION,
+    MAX_LOG_ENTRIES,
 )
 
 logger = logging.getLogger(__name__)
 
 PROXY_REQUEST_TIMEOUT = 2.5
+
+
+def _state_manager(request: Request):
+    """Prefer the app-scoped StateManager (what tests patch) and fall back
+    to the process-wide singleton."""
+    sm = getattr(request.app.state, "state_manager", None)
+    if sm is not None:
+        return sm
+    return get_state_manager()
 
 
 async def _get_proxy_servers(request: Request) -> list[dict[str, Any]]:
@@ -47,7 +61,7 @@ async def _get_proxy_servers(request: Request) -> list[dict[str, Any]]:
     if not proxy_data or not proxy_data.get("ok"):
         return proxy_servers
 
-    state_manager = get_state_manager()
+    state_manager = _state_manager(request)
     sources = proxy_data.get("sources", [])
     for source in sources:
         # We only care about per-server mounts, not the global/aggregate ones
@@ -101,24 +115,33 @@ async def _proxy_meta_request(
 @router.get("/servers")
 async def list_servers(request: Request):
     main_app = request.app
-    state_manager = get_state_manager()
+    _update_health_snapshot(main_app)
+    state_manager = _state_manager(request)
     servers = []
     server_names = set()
     for route in main_app.router.routes:
         if isinstance(route, Mount) and hasattr(route.app, 'state'):
             sub = route.app
             config_key = route.path.strip('/')
-            
+
             # Include OpenHubUI admin tools, but skip other FastMCP proxy apps
             if getattr(sub.state, "is_fastmcp_proxy", False) and config_key != "openhubui":
                 continue
-                
-            is_connected = bool(getattr(sub.state, "is_connected", False))
-            server_type = getattr(sub.state, "server_type", "internal" if config_key == "openhubui" else "unknown")
-            
-            # Get server enabled state from state manager
+
+            # Special handling for the internal MCPO management server: always
+            # appear connected and typed "internal" regardless of state flags.
+            if getattr(sub, "title", None) == "MCPO Management Server":
+                is_connected = True
+                server_type = "internal"
+            else:
+                is_connected = bool(getattr(sub.state, "is_connected", False))
+                server_type = getattr(
+                    sub.state, "server_type",
+                    "internal" if config_key == "openhubui" else "unknown",
+                )
+
             is_enabled = state_manager.is_server_enabled(config_key)
-            
+
             servers.append({
                 "name": config_key,
                 "connected": is_connected,
@@ -147,18 +170,17 @@ async def list_servers(request: Request):
 @router.get("/servers/{server_name}/tools")
 async def list_server_tools(server_name: str, request: Request):
     main_app = request.app
-    state_manager = get_state_manager()
+    state_manager = _state_manager(request)
 
-    # Standard handling for mounted MCP servers
     for route in main_app.router.routes:
         if isinstance(route, Mount) and hasattr(route.app, 'router') and route.path.rstrip('/') == f"/{server_name}":
             sub = route.app
             tools = []
-            
-            # Get server state for tool enabled status from state manager
+
+            is_internal = getattr(sub, "title", None) == "MCPO Management Server"
             server_state = state_manager.get_server_state(server_name)
             tool_states = server_state["tools"]
-            
+
             for r in sub.router.routes:
                 methods = getattr(r, 'methods', None) or []
                 if hasattr(r, 'methods') and 'POST' in methods and getattr(r, 'path', '/').startswith('/'):
@@ -167,11 +189,11 @@ async def list_server_tools(server_name: str, request: Request):
                         continue
                     if p.count('/') == 1:  # '/tool'
                         tname = p.lstrip('/')
-                        is_enabled = tool_states.get(tname, True)  # Default to enabled
-                        tools.append({
-                            "name": tname,
-                            "enabled": is_enabled
-                        })
+                        # Internal management tools are always enabled; for
+                        # configured servers fall back to "enabled unless
+                        # explicitly disabled".
+                        is_enabled = True if is_internal else tool_states.get(tname, True)
+                        tools.append({"name": tname, "enabled": is_enabled})
             return {"ok": True, "server": server_name, "tools": sorted(tools, key=lambda x: x['name'])}
     return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
 
@@ -190,9 +212,11 @@ async def get_config_content(request: Request):
     try:
         with open(path, 'r') as f:
             content = f.read()
-        return {"ok": True, "content": content}
+        return {"ok": True, "content": content, "path": path}
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content=error_envelope("Config file not found", code="not_found"))
     except Exception as e:
-        return JSONResponse(status_code=500, content=error_envelope("Failed to read config", data=str(e)))
+        return JSONResponse(status_code=500, content=error_envelope("Failed to read config", data=str(e), code="io_error"))
 
 
 @router.post("/config/save")
@@ -200,29 +224,33 @@ async def save_config_content(payload: Dict[str, Any], request: Request):
     main_app = request.app
     path = getattr(main_app.state, 'config_path', None)
     if not path:
-        return JSONResponse(status_code=400, content=error_envelope("No config-driven servers active", code="no_config"))
+        return JSONResponse(status_code=400, content=error_envelope("No config file configured", code="no_config"))
     content = payload.get("content")
-    if content is None:
-        return JSONResponse(status_code=422, content=error_envelope("Missing content", code="invalid"))
+    if not content or not isinstance(content, str):
+        return JSONResponse(status_code=422, content=error_envelope("Missing or invalid content", code="invalid"))
     try:
-        # Validate JSON
-        parsed = json.loads(content)
-        # Write file
+        # Validate JSON before saving
+        config_data = json.loads(content)
+
+        # Backup existing config
+        backup_path = f"{path}.backup"
+        if os.path.exists(path):
+            shutil.copy2(path, backup_path)
+
+        # Save new config
         with open(path, 'w') as f:
-            f.write(json.dumps(parsed, indent=2))
-        # Reload in-place
-        new_config = load_config(path)
-        await reload_config_handler(main_app, new_config)
+            f.write(content)
+
+        # Reload and remount
+        await reload_config_handler(main_app, config_data)
         _mount_or_remount_fastmcp(main_app, base_path="/mcp")
-        
-        # Invalidate aggregate OpenAPI cache
         main_app.state.aggregate_openapi_dirty = True
-        
-        return {"ok": True, "saved": True, "reloaded": True}
+
+        return {"ok": True, "message": "Configuration saved and reloaded", "backup": backup_path}
     except json.JSONDecodeError as e:
-        return JSONResponse(status_code=422, content=error_envelope("Invalid JSON", data=str(e), code="invalid_json"))
+        return JSONResponse(status_code=422, content=error_envelope("Invalid JSON format", data=str(e), code="invalid"))
     except Exception as e:
-        return JSONResponse(status_code=500, content=error_envelope("Failed to save config", data=str(e)))
+        return JSONResponse(status_code=500, content=error_envelope("Failed to save config", data=str(e), code="io_error"))
 
 
 @router.get("/config/mcpServers")
@@ -240,9 +268,11 @@ async def get_mcp_servers_content(request: Request):
             cfg = json.load(f)
         mcp_servers = cfg.get("mcpServers", {})
         content = json.dumps(mcp_servers, indent=2)
-        return {"ok": True, "content": content}
+        return {"ok": True, "content": content, "path": path}
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content=error_envelope("Config file not found", code="not_found"))
     except Exception as e:
-        return JSONResponse(status_code=500, content=error_envelope("Failed to read mcpServers", data=str(e)))
+        return JSONResponse(status_code=500, content=error_envelope("Failed to read mcpServers", data=str(e), code="io_error"))
 
 
 @router.post("/config/mcpServers/save")
@@ -308,7 +338,10 @@ async def get_logs(
     limit: int = 500,
 ):
     """Get recent log entries for UI display."""
-    if source == "mcp":
+    log_source = (source or "openapi").lower()
+    effective_limit = max(1, min(limit, MAX_LOG_ENTRIES))
+
+    if log_source == "mcp":
         proxy_data = await _proxy_meta_request(
             request,
             "/_meta/logs",
@@ -317,7 +350,8 @@ async def get_logs(
                 for key, value in {
                     "category": category,
                     "cursor": cursor,
-                    "limit": limit,
+                    "limit": effective_limit,
+                    "source": "mcp",
                 }.items()
                 if value is not None
             }
@@ -325,12 +359,16 @@ async def get_logs(
         if proxy_data:
             return proxy_data
 
-    log_manager = get_log_manager()
+    # Exclude httpx logs from openapi source to avoid showing proxy fetch logs
+    exclude_logger = "httpx" if log_source == "openapi" else None
+
+    log_manager = get_log_manager(MAX_LOG_ENTRIES)
     entries = log_manager.get_logs(
         category=category,
-        source=source,
+        source=log_source,
         after=cursor,
-        limit=limit,
+        limit=effective_limit,
+        exclude_logger=exclude_logger,
     )
     latest_cursor = log_manager.get_latest_sequence()
     next_cursor = entries[-1]["sequence"] if entries else latest_cursor
@@ -339,7 +377,7 @@ async def get_logs(
         "logs": entries,
         "nextCursor": next_cursor,
         "latestCursor": latest_cursor,
-        "limit": limit,
+        "limit": effective_limit,
     }
 
 
@@ -443,20 +481,21 @@ async def clear_logs_all(request: Request, source: Optional[str] = None):
 async def reload_config(request: Request):
     main_app = request.app
     if getattr(main_app.state, "read_only_mode", False):
-        return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
+        return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
     path = getattr(main_app.state, 'config_path', None)
     if not path:
         return JSONResponse(status_code=400, content=error_envelope("No config-driven servers active", code="no_config"))
     try:
         new_config = load_config(path)
         await reload_config_handler(main_app, new_config)
-        # Remount FastMCP proxy to reflect changes
         _mount_or_remount_fastmcp(main_app, base_path="/mcp")
-        
-        # Invalidate aggregate OpenAPI cache
         main_app.state.aggregate_openapi_dirty = True
-        
-        return {"ok": True, "reloaded": True}
+        return {
+            "ok": True,
+            "reloaded": True,
+            "generation": _health_state["generation"],
+            "lastReload": _health_state["last_reload"],
+        }
     except Exception as e:
         return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
 
@@ -465,7 +504,7 @@ async def reload_config(request: Request):
 async def reinit_server(server_name: str, request: Request):
     main_app = request.app
     if getattr(main_app.state, "read_only_mode", False):
-        return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
+        return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
     path = getattr(main_app.state, 'config_path', None)
     if not path:
         return JSONResponse(status_code=400, content=error_envelope("Reinit is only supported for config-driven servers", code="no_config"))
@@ -474,6 +513,18 @@ async def reinit_server(server_name: str, request: Request):
         servers = config_data.get("mcpServers", {})
         if server_name not in servers:
             return JSONResponse(status_code=404, content=error_envelope("Server not found in config", code="not_found"))
+        # Close the existing upstream session (if any) before unmounting so
+        # we don't leak socket/process resources on successive reinit calls.
+        for route in main_app.router.routes:
+            if isinstance(route, Mount) and hasattr(route.app, 'state') and route.path.rstrip('/') == f"/{server_name}":
+                sub = route.app
+                sess = getattr(sub.state, 'session', None)
+                if sess is not None and hasattr(sess, 'close'):
+                    try:
+                        await sess.close()
+                    except Exception:  # pragma: no cover - defensive
+                        pass
+                break
         # Unmount and remount just this server
         unmount_servers(main_app, getattr(main_app.state, 'path_prefix', '/'), [server_name])
         server_cfg = servers[server_name]
@@ -490,7 +541,18 @@ async def reinit_server(server_name: str, request: Request):
         main_app.mount(f"{getattr(main_app.state, 'path_prefix', '/')}{server_name}", sub_app)
         # Remount FastMCP proxy as well in case config impacts it
         _mount_or_remount_fastmcp(main_app, base_path="/mcp")
-        return {"ok": True, "reinitialized": True}
+        # Locate the freshly-mounted sub-app to report its connection flag.
+        connected = False
+        for route in main_app.router.routes:
+            if isinstance(route, Mount) and route.path.rstrip('/') == f"/{server_name}":
+                connected = bool(getattr(route.app.state, 'is_connected', False))
+                break
+        return {
+            "ok": True,
+            "server": server_name,
+            "reinitialized": True,
+            "connected": connected,
+        }
     except Exception as e:
         logger.error(f"Failed to reinit server {server_name}: {e}", exc_info=True)
         return JSONResponse(status_code=500, content=error_envelope("Reinit failed", data=str(e)))
@@ -542,14 +604,14 @@ async def enable_server(server_name: str, request: Request):
     try:
         if getattr(request.app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
-        state_manager = get_state_manager()
+        state_manager = _state_manager(request)
         state_manager.set_server_enabled(server_name, True)
         
         # Invalidate aggregate OpenAPI cache
         request.app.state.aggregate_openapi_dirty = True
         
         logger.info(f"Server '{server_name}' enabled")
-        return JSONResponse(content={"ok": True, "enabled": True})
+        return JSONResponse(content={"ok": True, "server": server_name, "enabled": True})
     except Exception as e:
         logger.error(f"Error enabling server {server_name}: {e}")
         return JSONResponse(
@@ -564,14 +626,14 @@ async def disable_server(server_name: str, request: Request):
     try:
         if getattr(request.app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
-        state_manager = get_state_manager()
+        state_manager = _state_manager(request)
         state_manager.set_server_enabled(server_name, False)
         
         # Invalidate aggregate OpenAPI cache
         request.app.state.aggregate_openapi_dirty = True
         
         logger.info(f"Server '{server_name}' disabled")
-        return JSONResponse(content={"ok": True, "enabled": False})
+        return JSONResponse(content={"ok": True, "server": server_name, "enabled": False})
     except Exception as e:
         logger.error(f"Error disabling server {server_name}: {e}")
         return JSONResponse(
@@ -586,14 +648,14 @@ async def enable_tool(server_name: str, tool_name: str, request: Request):
     try:
         if getattr(request.app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
-        state_manager = get_state_manager()
+        state_manager = _state_manager(request)
         state_manager.set_tool_enabled(server_name, tool_name, True)
         
         # Invalidate aggregate OpenAPI cache
         request.app.state.aggregate_openapi_dirty = True
         
         logger.info(f"Tool '{tool_name}' on server '{server_name}' enabled")
-        return JSONResponse(content={"ok": True, "enabled": True})
+        return JSONResponse(content={"ok": True, "server": server_name, "tool": tool_name, "enabled": True})
     except Exception as e:
         logger.error(f"Error enabling tool {tool_name}: {e}")
         return JSONResponse(
@@ -608,20 +670,111 @@ async def disable_tool(server_name: str, tool_name: str, request: Request):
     try:
         if getattr(request.app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
-        state_manager = get_state_manager()
+        state_manager = _state_manager(request)
         state_manager.set_tool_enabled(server_name, tool_name, False)
         
         # Invalidate aggregate OpenAPI cache
         request.app.state.aggregate_openapi_dirty = True
         
         logger.info(f"Tool '{tool_name}' on server '{server_name}' disabled")
-        return JSONResponse(content={"ok": True, "enabled": False})
+        return JSONResponse(content={"ok": True, "server": server_name, "tool": tool_name, "enabled": False})
     except Exception as e:
         logger.error(f"Error disabling tool {tool_name}: {e}")
         return JSONResponse(
             status_code=500,
             content=error_envelope(f"Failed to disable tool: {str(e)}")
         )
+
+
+@router.post("/servers")
+async def add_server(request: Request):
+    """Add a new server to config (only in config-driven mode) and reload."""
+    main_app = request.app
+    if getattr(main_app.state, 'read_only_mode', False):
+        return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
+    if not getattr(main_app.state, 'config_path', None):
+        return JSONResponse(status_code=400, content=error_envelope("Not running with a config file", code="no_config_mode"))
+
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse(status_code=422, content=error_envelope("Invalid JSON payload", code="invalid"))
+
+    name = payload.get("name")
+    if not name or not isinstance(name, str):
+        return JSONResponse(status_code=422, content=error_envelope("Missing name", code="invalid"))
+    name = name.strip()
+
+    config_data = getattr(main_app.state, 'config_data', {"mcpServers": {}})
+    if name in config_data.get("mcpServers", {}):
+        return JSONResponse(status_code=409, content=error_envelope("Server already exists", code="exists"))
+
+    server_entry: Dict[str, Any] = {}
+    command_str = payload.get("command")
+    if command_str:
+        if not isinstance(command_str, str):
+            return JSONResponse(status_code=422, content=error_envelope("command must be string", code="invalid"))
+        parts = command_str.strip().split()
+        if not parts:
+            return JSONResponse(status_code=422, content=error_envelope("Empty command", code="invalid"))
+        server_entry["command"] = parts[0]
+        if len(parts) > 1:
+            server_entry["args"] = parts[1:]
+    url = payload.get("url")
+    stype = payload.get("type")
+    if url:
+        server_entry["url"] = url
+        if stype:
+            server_entry["type"] = stype
+    env = payload.get("env")
+    if env and isinstance(env, dict):
+        server_entry["env"] = env
+
+    try:
+        validate_server_config(name, server_entry)
+    except Exception as e:
+        return JSONResponse(status_code=422, content=error_envelope(str(e), code="invalid"))
+
+    config_data.setdefault("mcpServers", {})[name] = server_entry
+    main_app.state.config_data = config_data
+
+    cfg_path = main_app.state.config_path
+    try:
+        with open(cfg_path, 'w') as f:
+            json.dump(config_data, f, indent=2, sort_keys=True)
+    except Exception as e:
+        return JSONResponse(status_code=500, content=error_envelope("Failed to write config", data=str(e), code="io_error"))
+
+    try:
+        await reload_config_handler(main_app, config_data)
+    except Exception as e:
+        return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
+    return {"ok": True, "server": name}
+
+
+@router.delete("/servers/{server_name}")
+async def remove_server(server_name: str, request: Request):
+    """Remove a server from config (only in config-driven mode) and reload."""
+    main_app = request.app
+    if not getattr(main_app.state, 'config_path', None):
+        return JSONResponse(status_code=400, content=error_envelope("Not running with a config file", code="no_config_mode"))
+    config_data = getattr(main_app.state, 'config_data', {"mcpServers": {}})
+    if server_name not in config_data.get("mcpServers", {}):
+        return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
+    del config_data["mcpServers"][server_name]
+    main_app.state.config_data = config_data
+
+    cfg_path = main_app.state.config_path
+    try:
+        with open(cfg_path, 'w') as f:
+            json.dump(config_data, f, indent=2, sort_keys=True)
+    except Exception as e:
+        return JSONResponse(status_code=500, content=error_envelope("Failed to write config", data=str(e), code="io_error"))
+    try:
+        await reload_config_handler(main_app, config_data)
+    except Exception as e:
+        return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
+    return {"ok": True, "removed": server_name}
 
 
 @router.get("/status")
@@ -675,17 +828,50 @@ async def get_stats(request: Request):
         return JSONResponse(status_code=500, content=error_envelope("Failed to get stats", data=str(e)))
 
 @router.get("/metrics")
-async def get_metrics():
-    """Expose execution metrics collected by RunnerService."""
+async def get_metrics(request: Request):
+    """Operational metrics snapshot: server/tool counts plus per-tool runner stats."""
     try:
+        state_manager = _state_manager(request)
+        all_states = state_manager.get_all_states()
+
+        servers_total = len(all_states)
+        servers_enabled = sum(1 for state in all_states.values() if state.get('enabled', True))
+
+        tools_total = 0
+        tools_enabled = 0
+        for state in all_states.values():
+            server_tools = state.get('tools', {})
+            tools_total += len(server_tools)
+            tools_enabled += sum(1 for enabled in server_tools.values() if enabled)
+
         runner = get_runner_service()
-        per_tool = runner.get_metrics()
-        aggregator = get_metrics_aggregator()
-        consolidated = aggregator.build_metrics(per_tool)
-        return JSONResponse(content={"ok": True, "metrics": consolidated})
+        runner_per_tool = runner.get_metrics()
+
+        per_tool_metrics: Dict[str, Dict[str, Any]] = {}
+        for tname, stats in runner_per_tool.items():
+            if not isinstance(stats, dict):
+                continue
+            per_tool_metrics[tname] = {
+                'calls': stats.get('calls', 0) or 0,
+                'errors': stats.get('errors', 0) or 0,
+                'avgLatencyMs': stats.get('avgLatencyMs', 0.0) or 0.0,
+                'maxLatencyMs': stats.get('maxLatencyMs', 0.0) or 0.0,
+            }
+
+        agg = get_metrics_aggregator().build_metrics(per_tool_metrics)
+        return {
+            "ok": True,
+            "metrics": {
+                "servers": {"total": servers_total, "enabled": servers_enabled},
+                "tools": {"total": tools_total, "enabled": tools_enabled},
+                "calls": {"total": agg.get("calls", 0)},
+                "errors": agg.get("errors", {}),
+                "perTool": agg.get("perTool", {}),
+            },
+        }
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
-        return JSONResponse(status_code=500, content=error_envelope("Failed to get metrics", data=str(e)))
+        return JSONResponse(status_code=500, content=error_envelope("Failed to get metrics", data=str(e), code="metrics_error"))
 
 @router.get("/requirements/content")
 async def get_requirements_content():
@@ -702,20 +888,53 @@ async def get_requirements_content():
 
 
 @router.post("/requirements/save")
-async def save_requirements_content(payload: Dict[str, Any]):
-    """Save requirements.txt content."""
+async def save_requirements_content(payload: Dict[str, Any], request: Request):
+    """Save requirements.txt content, install packages via pip, and reload servers."""
+    main_app = request.app
     content = payload.get("content")
     if content is None:
         return JSONResponse(status_code=422, content=error_envelope("Missing content", code="invalid"))
-    
+
     try:
         with open("requirements.txt", 'w') as f:
             f.write(content)
-        
-        # Optionally trigger pip install here
-        logger.info("Requirements.txt updated")
-        return {"ok": True, "message": "Requirements saved successfully"}
-        
+        logger.info("Requirements.txt updated; installing packages...")
+
+        packages = [
+            line.strip()
+            for line in content.splitlines()
+            if line.strip() and not line.strip().startswith('#')
+        ]
+
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if result.returncode != 0:
+                logger.error("pip install failed: %s", result.stderr)
+                return JSONResponse(
+                    status_code=500,
+                    content=error_envelope("Dependency installation failed", data=result.stderr, code="pip_failed"),
+                )
+        except subprocess.TimeoutExpired:
+            return JSONResponse(
+                status_code=408,
+                content=error_envelope("Dependency installation timed out", code="pip_timeout"),
+            )
+
+        # Reload servers if running with a config file
+        config_path = getattr(main_app.state, 'config_path', None)
+        if config_path and os.path.exists(config_path):
+            try:
+                new_config = load_config(config_path)
+                await reload_config_handler(main_app, new_config)
+            except Exception as e:  # pragma: no cover
+                logger.warning("Reload after requirements install failed: %s", e)
+
+        return {"ok": True, "message": "Requirements installed and servers reloaded", "packages": packages}
     except Exception as e:
         return JSONResponse(status_code=500, content=error_envelope("Failed to save requirements", data=str(e), code="io_error"))
 
@@ -733,7 +952,7 @@ async def aggregate_openapi(request: Request, force_refresh: bool = False):
     - Real-time filtering based on server and tool enable/disable states
     """
     main_app = request.app
-    state_manager = get_state_manager()
+    state_manager = _state_manager(request)
     
     # Check cache unless force refresh requested
     cache_key = "aggregate_openapi_cache"
