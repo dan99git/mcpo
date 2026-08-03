@@ -72,6 +72,10 @@ from mcpo.services.state import StateSaveError, get_state_manager
 from mcpo.services.model_api_keys import get_model_api_key_store, ModelAPIKeyStoreError
 from mcpo.services.logging import get_log_manager
 from mcpo.services.logging_handlers import BufferedLogHandler
+from mcpo.services.file_logging import (
+    reattach_uvicorn_file_handlers,
+    setup_file_logging,
+)
 
 from mcpo.api.routers.admin import (
     _mount_or_remount_fastmcp,
@@ -2050,6 +2054,9 @@ async def build_main_app(
             )
         )
 
+    # Persistent rotating file log (survives restarts, unlike the UI buffer)
+    setup_file_logging("serve", port)
+
     # Ensure access logs are retained for troubleshooting; rely on logging config for verbosity
     logging.getLogger("uvicorn.access").setLevel(logging.INFO)
     logging.getLogger("httpx").setLevel(logging.INFO)
@@ -3782,6 +3789,10 @@ async def run(
         ssl_keyfile=ssl_keyfile,
         log_level=log_level,
     )
+    # uvicorn.Config just applied its dictConfig, which strips handlers from the
+    # non-propagating uvicorn loggers; re-attach the file handler so access and
+    # error lines persist to disk.
+    reattach_uvicorn_file_handlers()
     server = uvicorn.Server(config)
 
     # Setup signal handlers

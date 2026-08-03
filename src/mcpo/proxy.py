@@ -32,6 +32,10 @@ from mcp_types.version import MODERN_PROTOCOL_VERSIONS
 
 from mcpo.services.logging import get_log_manager
 from mcpo.services.logging_handlers import BufferedLogHandler
+from mcpo.services.file_logging import (
+    reattach_uvicorn_file_handlers,
+    setup_file_logging,
+)
 from mcpo.services.state import get_state_manager
 from mcpo.middleware.mcp_tool_filter import MCPToolFilterMiddleware
 from mcpo.middleware.code_mode import CodeModeMCPMiddleware
@@ -724,6 +728,10 @@ def oauth_app_factory() -> FastAPI:
     structural config changes are re-read and the mounts rebuilt from scratch.
     """
     logging.basicConfig(level=logging.INFO)
+    # Reloader child process: attach the rotating file log here (the parent
+    # supervisor skips it so only one process holds the file).
+    setup_file_logging("proxy", int(os.environ.get("MCPO_OAUTH_PORT", "8351")))
+    reattach_uvicorn_file_handlers()
     config_path = Path(os.environ["MCPO_OAUTH_CONFIG"]).expanduser()
     cfg, servers = _load_filtered_config(config_path)
     return _build_oauth_app(
@@ -800,6 +808,9 @@ async def _run_oauth_proxy(
         timeout_graceful_shutdown=0,
         lifespan="on",
     )
+    # uvicorn.Config's dictConfig strips handlers from the non-propagating
+    # uvicorn loggers; re-attach the file handler so access/error lines persist.
+    reattach_uvicorn_file_handlers()
     server = uvicorn.Server(config)
     await server.serve()
 
@@ -1204,6 +1215,13 @@ async def run_proxy(
             logger_obj.addHandler(buffered_handler)
     root_logger.setLevel(getattr(logging, log_level.upper(), logging.INFO))
 
+    # Persistent rotating file log (survives restarts, unlike the UI buffer).
+    # Skipped for the oauth hot-reload branch: uvicorn's reloader runs the app
+    # in a child process, and two processes holding the same rotating file
+    # breaks rollover on Windows. The child sets it up in oauth_app_factory.
+    if not (oauth and hot_reload):
+        setup_file_logging("proxy", port)
+
     cfg, filtered_servers = _load_filtered_config(config_path)
 
     if oauth:
@@ -1322,6 +1340,9 @@ async def run_proxy(
         timeout_graceful_shutdown=0,
         lifespan="on",
     )
+    # uvicorn.Config's dictConfig strips handlers from the non-propagating
+    # uvicorn loggers; re-attach the file handler so access/error lines persist.
+    reattach_uvicorn_file_handlers()
     server = uvicorn.Server(config)
     try:
         await server.serve()

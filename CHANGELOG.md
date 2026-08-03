@@ -5,6 +5,42 @@ Every change set that touches `src/`, `static/`, `tests/`, or dependencies MUST
 add an entry under an `## Unreleased` heading in the same commit — enforced by
 `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`).
 
+## Unreleased (dev) — 2026-08-03 (persistent rotating file logs)
+
+### Added
+- Persistent rotating file logging (`src/mcpo/services/file_logging.py`):
+  `RotatingFileHandler` on the root logger, 5 MB per file, 3 backups, UTF-8,
+  full tracebacks. Survives restarts, unlike the in-memory UI log buffer.
+  Files derive from mode + port so the three start.bat processes never
+  collide: serve -> `logs/openapi.log`, proxy 8001 -> `logs/proxy-8001.log`,
+  OAuth proxy 8351 -> `logs/proxy-8351.log`. Directory override via
+  `MCPO_LOG_DIR` (default `<repo>/logs`, created if missing). If the file
+  cannot be opened a loud stderr warning is printed and the process keeps
+  running on console/UI logging (no crash, no silent failure).
+- Wired in both entrypoints: `build_main_app` (serve) and `run_proxy`
+  (proxy + OAuth). uvicorn's dictConfig (inside `uvicorn.Config.__init__`)
+  strips handlers from the non-propagating `uvicorn`/`uvicorn.access`
+  loggers, so `reattach_uvicorn_file_handlers()` runs after each
+  `uvicorn.Config(...)` to keep access/error lines on disk. OAuth
+  hot-reload runs the app in a reloader child process; only the child
+  attaches the file (in `oauth_app_factory`) because two processes holding
+  one rotating file breaks rollover on Windows.
+
+### Changed
+- `start.bat` no longer truncates `logs/openapi.log`/`logs/proxy.log` at
+  launch; the apps own their log files now and history persists.
+- `tests/conftest.py` points `MCPO_LOG_DIR` at a temp dir so pytest runs
+  stop appending test noise into the real debug logs.
+
+### Verified
+- `tests/test_file_logging.py` (9 tests): filename derivation per mode/port,
+  `MCPO_LOG_DIR` override, rotation config (5 MB / 3 / utf-8), line +
+  traceback written, idempotent attach, stderr warning on unopenable dir,
+  uvicorn reattach without duplicates. Full suite 777 passed / 0 failed /
+  2 skipped (baseline 768, +9 new). Live: serve on 18000 and proxy on 18001
+  wrote startup, uvicorn access (404/401) lines and real tracebacks to
+  `logs/openapi.log` and `logs/proxy-18001.log`.
+
 ## Unreleased (trial/codex-keys) — 2026-07-31 (per-key usage accounting)
 
 ### Added

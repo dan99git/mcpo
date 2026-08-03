@@ -54,10 +54,9 @@ rem --install remains accepted for compatibility; every launch performs a locked
 
 set "LOG_DIR=%ROOT%\logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
-set "OPENAPI_LOG=%LOG_DIR%\openapi.log"
-set "PROXY_LOG=%LOG_DIR%\proxy.log"
-echo [Start %DATE% %TIME%] > "%OPENAPI_LOG%"
-echo [Start %DATE% %TIME%] > "%PROXY_LOG%"
+rem Log files are owned by the apps themselves (rotating file logging in
+rem src/mcpo/services/file_logging.py): logs\openapi.log, logs\proxy-8001.log,
+rem logs\proxy-8351.log. Do NOT truncate them here; they persist across restarts.
 
 rem If MCPO_API_KEY is set, enforce auth on port 8000 (admin + completions)
 set "AUTH_FLAGS="
