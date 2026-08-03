@@ -1,4 +1,4 @@
-@echo on
+@echo off
 setlocal
 
 rem Change to this script's directory
@@ -31,18 +31,14 @@ pause
 exit /b 1
 
 :CHECK_VENV_CFG
-if exist "%VENV_CFG%" goto INSTALL_VENV_DEPS
+if exist "%VENV_CFG%" goto SYNC_NEW_VENV
 echo Virtual environment appears invalid (missing pyvenv.cfg). Aborting.
 pause
 exit /b 1
 
-:INSTALL_VENV_DEPS
-echo Upgrading pip and installing dependencies...
-"%VENV_BIN%\python.exe" -m pip install --upgrade pip
-if exist "%ROOT%\requirements.txt" echo Installing dependencies from requirements.txt...
-if exist "%ROOT%\requirements.txt" "%VENV_BIN%\python.exe" -m pip install -r "%ROOT%\requirements.txt"
-if exist "%ROOT%\audio\whisper-server\WIN\requirements.txt" echo Installing Windows Whisper server dependencies...
-if exist "%ROOT%\audio\whisper-server\WIN\requirements.txt" "%VENV_BIN%\python.exe" -m pip install -r "%ROOT%\audio\whisper-server\WIN\requirements.txt"
+:SYNC_NEW_VENV
+call :SYNC_PROJECT
+if errorlevel 1 exit /b 1
 goto AFTER_VENV
 
 :AFTER_VENV
@@ -54,17 +50,7 @@ if exist "%VENV_BIN%\python.exe" set "PY_EXE=%VENV_BIN%\python.exe"
 rem Activate venv for this launcher session (optional but convenient)
 if exist "%VENV_BIN%\activate.bat" call "%VENV_BIN%\activate.bat"
 
-rem Optional install: run with --install to (re)install deps
-if /i "%~1"=="--install" (
-	if exist "%ROOT%\requirements.txt" (
-		echo Installing dependencies from requirements.txt...
-		"%PY_EXE%" -m pip install -r "%ROOT%\requirements.txt"
-	)
-	if exist "%ROOT%\audio\whisper-server\WIN\requirements.txt" (
-		echo Installing Windows Whisper server dependencies...
-		"%PY_EXE%" -m pip install -r "%ROOT%\audio\whisper-server\WIN\requirements.txt"
-	)
-)
+rem --install remains accepted for compatibility; every launch performs a locked sync.
 
 set "LOG_DIR=%ROOT%\logs"
 if not exist "%LOG_DIR%" mkdir "%LOG_DIR%" >nul 2>&1
@@ -77,7 +63,20 @@ rem If MCPO_API_KEY is set, enforce auth on port 8000 (admin + completions)
 set "AUTH_FLAGS="
 if defined MCPO_API_KEY set "AUTH_FLAGS=--api-key %MCPO_API_KEY% --strict-auth"
 
-rem Use module runners to avoid locking Windows console scripts during pip installs
+rem If MCPO_API_KEY is set, enforce auth on port 8001 (MCP streamable HTTP proxy)
+set "PROXY_AUTH_FLAGS="
+if defined MCPO_API_KEY set "PROXY_AUTH_FLAGS=--api-key %MCPO_API_KEY%"
+
+rem Clear ports 8000/8001 of any previous instance (and its full MCP child process
+rem tree) before launching, so this launch replaces the old one instead of colliding
+rem with it on bind.
+echo Clearing ports 8000 8001 8351 of any previous instance...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%ROOT%\tools\clear_ports.ps1' -Ports 8000,8001,8351"
+
+call :SYNC_PROJECT
+if errorlevel 1 exit /b 1
+
+rem Use module runners to avoid locking Windows console scripts during dependency syncs
 rem (inline commands to avoid quote-escaping issues)
 
 rem Whisper server moved to dev/audio/ (experimental - not included in stable release)
@@ -87,8 +86,21 @@ rem start "Whisper WIN 8002" cmd /k "cd /d %ROOT%\dev\audio\whisper-server\WIN &
 rem Start MCPO Admin (FastAPI) on port 8000 in a new console window
 start "MCPO Admin 8000" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo serve --config %ROOT%\mcpo.json --host 0.0.0.0 --port 8000 --hot-reload --env-path %ROOT%\.env --log-level debug %AUTH_FLAGS%"
 
-rem Start MCPP Proxy (Streamable HTTP) on port 8001 in a new console window  
-start "MCPP Proxy 8001" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo.proxy --config %ROOT%\mcpo.json --host 0.0.0.0 --port 8001 --stateless-http --env-path %ROOT%\.env --log-level debug"
+rem Start MCPP Proxy (Streamable HTTP) on port 8001 in a new console window
+rem --hot-reload watches structural mcpo.json changes. Shared state toggles are
+rem enforced per request and do not rebuild or kill MCP server runtimes.
+start "MCPP Proxy 8001" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo.proxy --config %ROOT%\mcpo.json --host 0.0.0.0 --port 8001 --hot-reload --env-path %ROOT%\.env --log-level debug %PROXY_AUTH_FLAGS%"
+
+rem Start MCPO OAuth Proxy (Streamable HTTP + self-hosted OAuth for ChatGPT / Claude
+rem Desktop remote connectors) on port 8351. It shares 8001's MCP routes, tools,
+rem filtering, calls, and toggle behavior. OAuth is the only added behavior.
+start "MCPO OAuth 8351" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo.proxy --config %ROOT%\mcpo.json --host 127.0.0.1 --port 8351 --oauth --public-url https://dev.ai.lighting --hot-reload --env-path %ROOT%\.env --log-level debug"
+
+rem Start crash-recovery watchdog in its own console window. It probes 8000
+rem (/healthz), 8001 and 8351 (TCP listen) every 15s and restarts ONLY a
+rem crashed service (max 3 restarts per service per 5 minutes). Logs to
+rem logs\watchdog.log, writes its PID to logs\watchdog.pid for stop.bat.
+start "MCPO Watchdog" powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\watchdog.ps1"
 
 echo.
 echo ====================================================================
@@ -101,8 +113,25 @@ echo.
 echo Streamable HTTP: http://localhost:8001/{server-name}
 echo   (For OpenWebUI integration)
 echo.
+echo OAuth MCP (8351): http://localhost:8351/mcp  ^| tunnel: https://dev.ai.lighting/mcp
+echo   (For ChatGPT / Claude Desktop remote connectors)
+echo.
 echo Use stop.bat to terminate services cleanly.
 echo ====================================================================
-echo Close this window or press any key to exit launcher...
-pause >nul
+echo Launcher complete.
 endlocal
+exit /b 0
+
+:SYNC_PROJECT
+echo Syncing project dependencies from uv.lock...
+uv sync --frozen --group dev
+if errorlevel 1 (
+	echo Failed to sync project dependencies with uv.
+	exit /b 1
+)
+"%VENV_BIN%\python.exe" -c "import mcpo, typer"
+if errorlevel 1 (
+	echo Project import validation failed for mcpo or typer.
+	exit /b 1
+)
+exit /b 0

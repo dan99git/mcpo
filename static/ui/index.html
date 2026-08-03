@@ -4,16 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Open HubUI</title>
-    <link rel="icon" type="image/png" href="/favicon.png">
+    <link rel="icon" type="image/png" href="/ui/logos/OI-logo-light.png">
     
     <!-- Modular CSS -->
     <link rel="stylesheet" href="/ui/css/base.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/layout.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/components.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/logs.css?v=20250930222949">
-    <link rel="stylesheet" href="/ui/css/config.css?v=20250930222949">
-    <link rel="stylesheet" href="/ui/css/chat.css?v=20251203">
-    <link rel="stylesheet" href="/ui/css/settings.css?v=20260226">
+    <link rel="stylesheet" href="/ui/css/config.css?v=20260721">
+    <link rel="stylesheet" href="/ui/css/chat.css?v=202607211730">
+    <link rel="stylesheet" href="/ui/css/settings.css?v=20260722">
 </head>
 <body data-theme="light">
     <div class="app">
@@ -82,8 +82,17 @@
         <!-- Main Content -->
         <div class="main">
             <header class="main-header">
-                <h1 class="page-title" id="page-title">MCP Servers</h1>
-                <p class="page-subtitle" id="page-subtitle">Manage your MCP server connections</p>
+                <div class="main-header-row">
+                    <div class="main-header-titles">
+                        <h1 class="page-title" id="page-title">MCP Servers</h1>
+                        <p class="page-subtitle" id="page-subtitle">Manage your MCP server connections</p>
+                    </div>
+                    <div class="rest-tools-toggle-group" id="rest-tools-toggle-group" title="Enable or disable REST-side tool endpoints (port 8000). The MCP proxy (port 8001) is not affected.">
+                        <span class="rest-tools-toggle-label">REST Tools</span>
+                        <div class="toggle" id="rest-tools-toggle"></div>
+                        <span class="rest-tools-toggle-state" id="rest-tools-toggle-state">&mdash;</span>
+                    </div>
+                </div>
             </header>
 
             <main class="main-content">
@@ -189,31 +198,33 @@
                 <!-- Skills Page -->
                 <div class="page" id="skills-page">
                     <div class="sk-layout">
-                        <!-- Left: Skill List -->
                         <div class="sk-list-panel">
                             <div class="sk-list-header">
                                 <span class="sk-list-title">Skills</span>
-                                <button class="btn" id="skills-new-btn" type="button">+ New</button>
+                                <div class="sk-list-actions">
+                                    <button class="btn" id="skills-new-btn" type="button">+ New</button>
+                                    <button class="btn btn-primary" id="skills-install-btn" type="button">Install</button>
+                                </div>
                             </div>
                             <div class="sk-list" id="skills-list">
                                 <!-- Cards rendered by JS -->
                             </div>
                         </div>
 
-                        <!-- Right: Editor -->
                         <div class="sk-editor-panel" id="skills-editor-panel">
-                            <!-- Empty state (shown when nothing selected) -->
+                            <div class="sk-status" id="skills-status" role="status" aria-live="polite" hidden></div>
+
                             <div class="sk-empty" id="skills-empty-state">
                                 <div class="sk-empty-icon">&#9998;</div>
                                 <div class="sk-empty-title">No skill selected</div>
-                                <div class="sk-empty-text">Select a skill from the list or create a new one. Skills are markdown packs injected into chat and completions requests.</div>
+                                <div class="sk-empty-text">Select a skill, create one, or install an inspected skill package. Skills are injected into chat and completion requests.</div>
                             </div>
 
-                            <!-- Editor form (hidden until a skill is selected) -->
                             <div class="sk-editor" id="skills-editor" style="display:none;">
                                 <div class="sk-editor-toolbar">
                                     <div class="sk-editor-toolbar-left">
                                         <span class="sk-editor-mode" id="skills-editor-mode">Editing</span>
+                                        <span class="sk-editor-meta" id="skills-editor-meta"></span>
                                     </div>
                                     <div class="sk-editor-toolbar-right">
                                         <button class="btn btn-danger" id="skills-delete-btn" type="button">Delete</button>
@@ -237,6 +248,120 @@
                                     <textarea id="skills-content-input" class="sk-input sk-textarea-lg" placeholder="Skill markdown content — this is injected into system prompts"></textarea>
                                 </div>
                             </div>
+
+                            <div class="sk-installer" id="skills-installer" style="display:none;">
+                                <div class="sk-installer-toolbar">
+                                    <div>
+                                        <h2 class="sk-installer-title">Install packages</h2>
+                                        <p class="sk-installer-subtitle">Review every package before MCPO writes it to the managed install area.</p>
+                                    </div>
+                                    <div class="sk-installer-actions">
+                                        <button class="btn" id="skills-installer-refresh-btn" type="button">Refresh</button>
+                                        <button class="btn" id="skills-installer-close-btn" type="button">Close</button>
+                                    </div>
+                                </div>
+
+                                <div class="sk-installer-grid">
+                                    <section class="sk-install-section" aria-labelledby="skill-package-title">
+                                        <div class="sk-install-section-header">
+                                            <div>
+                                                <h3 id="skill-package-title">Skill package</h3>
+                                                <p>Inspect a local <strong>.skill</strong> or <strong>.zip</strong> archive before installing it.</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="sk-install-form">
+                                            <label class="sk-label" for="skill-package-file-input">Package file</label>
+                                            <div class="sk-install-inline">
+                                                <input class="sk-input sk-file-input" id="skill-package-file-input" type="file" accept=".skill,.zip,application/zip" />
+                                                <button class="btn" id="skill-package-inspect-btn" type="button">Inspect</button>
+                                            </div>
+                                        </div>
+
+                                        <div class="sk-review" id="skill-package-preview" hidden>
+                                            <div class="sk-review-summary" id="skill-package-summary"></div>
+                                            <div class="sk-review-items" id="skill-package-skills"></div>
+                                            <div class="sk-review-warnings" id="skill-package-warnings"></div>
+                                            <label class="sk-confirm">
+                                                <input id="skill-package-confirm" type="checkbox" />
+                                                <span>I reviewed this archive and confirm installation.</span>
+                                            </label>
+                                            <button class="btn btn-primary" id="skill-package-install-btn" type="button" disabled>Install skill package</button>
+                                        </div>
+
+                                        <div class="sk-installed-header">Installed skill packages</div>
+                                        <div class="sk-package-list" id="skill-packages-list">
+                                            <div class="sk-list-empty">Loading packages...</div>
+                                        </div>
+                                    </section>
+
+                                    <section class="sk-install-section" aria-labelledby="cli-package-title">
+                                        <div class="sk-install-section-header">
+                                            <div>
+                                                <h3 id="cli-package-title">CLI package</h3>
+                                                <p>Install a version-pinned Python or npm command into MCPO's isolated tools area.</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="sk-install-form">
+                                            <label class="sk-label" for="cli-package-kind">Package manager</label>
+                                            <select class="sk-input" id="cli-package-kind">
+                                                <option value="python">Python</option>
+                                                <option value="npm">npm</option>
+                                            </select>
+
+                                            <label class="sk-label" for="cli-package-spec">Pinned package</label>
+                                            <input class="sk-input" id="cli-package-spec" type="text" autocomplete="off" placeholder="your-cli==1.2.3" />
+                                            <div class="sk-field-hint" id="cli-package-hint">Use an exact version such as your-cli==1.2.3. Python packages require a compatible binary wheel.</div>
+
+                                            <label class="sk-confirm sk-confirm-muted" id="cli-allow-scripts-row">
+                                                <input id="cli-package-allow-scripts" type="checkbox" disabled />
+                                                <span>Allow npm lifecycle scripts. Leave unchecked unless the package requires them.</span>
+                                            </label>
+
+                                            <button class="btn" id="cli-package-plan-btn" type="button">Review install plan</button>
+                                        </div>
+
+                                        <div class="sk-review" id="cli-package-preview" hidden>
+                                            <div class="sk-review-summary" id="cli-package-summary"></div>
+                                            <code class="sk-command-preview" id="cli-package-command"></code>
+                                            <label class="sk-confirm">
+                                                <input id="cli-package-confirm" type="checkbox" />
+                                                <span>I reviewed this exact plan and confirm installation.</span>
+                                            </label>
+                                            <button class="btn btn-primary" id="cli-package-install-btn" type="button" disabled>Install CLI package</button>
+                                        </div>
+
+                                        <div class="sk-installed-header">Installed CLI packages</div>
+                                        <div class="sk-package-list" id="cli-packages-list">
+                                            <div class="sk-list-empty">Loading packages...</div>
+                                        </div>
+                                    </section>
+
+                                    <section class="sk-install-section" aria-labelledby="tool-package-title">
+                                        <div class="sk-install-section-header">
+                                            <div>
+                                                <h3 id="tool-package-title">Tool proposal</h3>
+                                                <p>Lint exact-case <strong>TOOL.yaml</strong> files inside a local archive. This is read-only: nothing is installed, activated, or executed.</p>
+                                            </div>
+                                        </div>
+
+                                        <div class="sk-install-form">
+                                            <label class="sk-label" for="tool-package-file-input">Proposal archive</label>
+                                            <div class="sk-install-inline">
+                                                <input class="sk-input sk-file-input" id="tool-package-file-input" type="file" accept=".skill,.zip,application/zip" />
+                                                <button class="btn" id="tool-package-preview-btn" type="button">Lint and preview</button>
+                                            </div>
+                                            <div class="sk-field-hint">The preview binds the raw archive and every TOOL.yaml to SHA-256 hashes and checks installed CLI entry points.</div>
+                                        </div>
+
+                                        <div class="sk-review" id="tool-package-preview" hidden>
+                                            <div class="sk-review-summary" id="tool-package-summary"></div>
+                                            <div id="tool-package-manifests"></div>
+                                        </div>
+                                    </section>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -244,56 +369,322 @@
                 <!-- Chat Page -->
                 <div class="page" id="chat-page">
                     <div class="chat-page-layout">
-                        <div class="chat-side chat-side-left">
-                            <div class="chat-model-picker">
-                                <div class="chat-model-row">
-                                    <select id="chat-model-select" class="chat-model-select"></select>
-                                    <button class="btn btn-ghost chat-model-toggle" id="chat-model-fav-toggle" type="button" title="Choose favorite models">★</button>
-                                </div>
-                                <div id="chat-model-list" class="chat-model-list hidden">
-                                    <div class="model-search">
-                                        <input id="chat-model-search" type="search" placeholder="Search models..." />
+                        <aside class="chat-side chat-side-left" aria-label="Chat controls">
+                            <section class="chat-control-card chat-model-picker">
+                                <div class="chat-control-heading">
+                                    <div>
+                                        <div class="chat-control-label">Model</div>
+                                        <div class="chat-control-hint">Provider-qualified routing</div>
                                     </div>
-                                    <div id="chat-model-list-items"></div>
+                                    <button class="btn btn-ghost chat-model-toggle" id="chat-model-fav-toggle" type="button" title="Show favorite models" aria-label="Show favorite models">★</button>
                                 </div>
-                            </div>
-                            <div class="chat-model-picker chat-skills-panel">
-                                <div class="chat-model-row">
-                                    <div class="chat-skills-label">Skills</div>
-                                    <button class="btn btn-ghost chat-model-toggle" id="chat-skill-toggle" type="button" title="Choose skills">+</button>
+                                <label class="chat-provider-filter" for="chat-provider-filter">
+                                    <span>Provider</span>
+                                    <select id="chat-provider-filter">
+                                        <option value="all">All providers</option>
+                                    </select>
+                                </label>
+                                <input id="chat-model-select" type="hidden" />
+                                <button class="chat-model-trigger" id="chat-model-trigger" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="chat-model-list">
+                                    <span class="chat-model-trigger-copy">
+                                        <strong id="chat-model-selected-label">Choose a model</strong>
+                                        <span id="chat-model-selected-provider">No provider configured</span>
+                                    </span>
+                                    <span class="chat-model-trigger-chevron" aria-hidden="true">⌄</span>
+                                </button>
+                                <div id="chat-model-list" class="chat-model-list hidden" role="dialog" aria-label="Choose a model">
+                                    <div class="model-search">
+                                        <label class="sr-only" for="chat-model-search">Search models</label>
+                                        <input id="chat-model-search" type="search" placeholder="Search model, provider, capability..." autocomplete="off" />
+                                    </div>
+                                    <div class="chat-model-filters" role="group" aria-label="Model filters">
+                                        <button class="chat-filter active" id="chat-model-filter-all" type="button" data-model-filter="all">All</button>
+                                        <button class="chat-filter" id="chat-model-filter-favorites" type="button" data-model-filter="favorites">Favorites</button>
+                                        <button class="chat-filter" id="chat-model-filter-free" type="button" data-model-filter="free">Free</button>
+                                    </div>
+                                    <div id="chat-model-groups" class="chat-model-groups"></div>
+                                    <div id="chat-model-list-status" class="chat-picker-status" role="status" aria-live="polite"></div>
                                 </div>
-                                <div id="chat-active-skills" class="chat-active-skills"></div>
-                                <div id="chat-skill-list" class="chat-model-list hidden">
+                            </section>
+
+                            <section class="chat-control-card chat-skills-panel">
+                                <div class="chat-control-heading">
+                                    <div>
+                                        <div class="chat-control-label">Skills</div>
+                                        <div id="chat-active-skills" class="chat-active-skills">Loading...</div>
+                                    </div>
+                                    <button class="btn btn-ghost chat-model-toggle" id="chat-skill-toggle" type="button" title="Choose skills" aria-expanded="false" aria-controls="chat-skill-list">+</button>
+                                </div>
+                                <div id="chat-skill-list" class="chat-skill-list hidden">
                                     <div id="chat-skill-list-items"></div>
                                 </div>
-                            </div>
-                        </div>
-                        <div class="chat-shell">
+                            </section>
+
+                            <details class="chat-control-card chat-agent-controls" open>
+                                <summary>Agent controls</summary>
+                                <div class="chat-control-body">
+                                    <label class="chat-field" for="chat-temperature">
+                                        <span>Temperature</span>
+                                        <input id="chat-temperature" type="number" min="0" max="2" step="0.1" placeholder="Provider default" />
+                                    </label>
+                                    <label class="chat-field" for="chat-max-output-tokens">
+                                        <span>Max output tokens</span>
+                                        <input id="chat-max-output-tokens" type="number" min="1" max="1000000" step="1" placeholder="Provider default" />
+                                    </label>
+                                    <label class="chat-field" for="chat-max-tool-rounds">
+                                        <span>Max tool rounds</span>
+                                        <input id="chat-max-tool-rounds" type="number" min="1" max="20" step="1" value="8" />
+                                    </label>
+                                    <label class="chat-check-row">
+                                        <input id="chat-include-reasoning" type="checkbox" checked />
+                                        <span>Request reasoning</span>
+                                    </label>
+                                    <label class="chat-field" for="chat-reasoning-effort">
+                                        <span>Reasoning effort</span>
+                                        <select id="chat-reasoning-effort">
+                                            <option value="">Provider default</option>
+                                            <option value="minimal">Minimal</option>
+                                            <option value="low">Low</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="high">High</option>
+                                        </select>
+                                    </label>
+                                    <div id="chat-model-capabilities" class="chat-capability-summary"></div>
+                                </div>
+                            </details>
+
+                            <details class="chat-control-card chat-tool-controls">
+                                <summary>Tool access <span id="chat-tool-count" class="chat-summary-count">0</span></summary>
+                                <div class="chat-control-body">
+                                    <label class="chat-check-row chat-check-warning">
+                                        <input id="chat-include-management-tools" type="checkbox" />
+                                        <span>Allow MCPO management tools</span>
+                                    </label>
+                                    <p class="chat-control-hint">Management tools can change MCPO configuration. They are off by default.</p>
+                                    <label class="chat-check-row">
+                                        <input id="chat-all-servers" type="checkbox" checked />
+                                        <span>Use all enabled MCP servers</span>
+                                    </label>
+                                    <div id="chat-server-list" class="chat-server-list"></div>
+                                    <button class="btn" id="chat-refresh-tools" type="button">Refresh tool catalog</button>
+                                </div>
+                            </details>
+
+                            <section class="chat-session-controls" aria-label="Session controls">
+                                <div id="chat-session-meta" class="chat-session-meta">No active session</div>
+                                <div class="chat-session-actions">
+                                    <button class="btn" id="chat-reset-session" type="button">Clear chat</button>
+                                    <button class="btn btn-primary" id="chat-new-session" type="button">New chat</button>
+                                </div>
+                            </section>
+                        </aside>
+
+                        <section class="chat-shell" aria-label="Chat conversation">
                             <div class="chat-stream" id="chat-messages"></div>
 
-                        <div class="chat-footer">
-                            <div class="chat-alerts" id="chat-alerts"></div>
-                            <form class="chat-composer" id="chat-input-form">
-                                <textarea id="chat-input-text" placeholder="Send a message" rows="1"></textarea>
-                                <div class="chat-composer-footer">
-                                    <label class="chat-stream-toggle">
-                                        <input type="checkbox" id="chat-stream-toggle" checked />
-                                        <span>Stream response</span>
-                                    </label>
-                                    <div class="chat-composer-actions">
-                                        <button class="btn" type="button" id="chat-stop-stream" disabled>Stop</button>
-                                        <button class="btn btn-primary" type="submit">Send</button>
+                            <div class="chat-footer">
+                                <div class="chat-alerts" id="chat-alerts" role="status" aria-live="polite"></div>
+                                <div class="chat-attachment-preview" id="chat-attachment-preview" aria-live="polite"></div>
+                                <form class="chat-composer" id="chat-input-form">
+                                    <textarea id="chat-input-text" placeholder="Message the selected model" rows="1"></textarea>
+                                    <div class="chat-composer-toolbar">
+                                        <input id="chat-attachment-input" type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp,text/*,application/json,application/ld+json,application/xml,application/yaml,application/x-yaml,application/javascript,application/pdf,.txt,.md,.csv,.log,.py,.js,.ts,.json,.xml,.yaml,.yml" />
+                                        <label class="btn chat-attachment-button" for="chat-attachment-input">Attach files</label>
+                                        <span class="chat-attachment-hint">Images, UTF-8 text, or PDF. 5 MiB each, 8 files.</span>
                                     </div>
-                                </div>
-                            </form>
-                        </div>
-                        </div>
+                                    <div class="chat-composer-footer">
+                                        <label class="chat-stream-toggle">
+                                            <input type="checkbox" id="chat-stream-toggle" checked />
+                                            <span>Stream response</span>
+                                        </label>
+                                        <div class="chat-composer-actions">
+                                            <button class="btn" type="button" id="chat-stop-stream" disabled>Stop</button>
+                                            <button class="btn btn-primary" id="chat-send-button" type="submit">Send</button>
+                                        </div>
+                                    </div>
+                                </form>
+                            </div>
+                        </section>
                     </div>
                 </div>
                 
                 <!-- Settings Page -->
                 <div class="page" id="settings-page">
                     <div class="settings-layout">
+                        <!-- Model Providers -->
+                        <section class="settings-section settings-section-wide">
+                            <div class="settings-section-header settings-header-row">
+                                <div>
+                                    <h2 class="settings-section-title">Model Providers</h2>
+                                    <p class="settings-section-subtitle">Add hosted or local inference APIs. Saved keys are never returned to the browser.</p>
+                                </div>
+                                <button class="btn btn-primary" id="settings-provider-add" type="button">Add provider</button>
+                            </div>
+                            <div class="settings-section-body">
+                                <div id="settings-provider-status" class="settings-inline-status" role="status" aria-live="polite"></div>
+                                <div id="settings-provider-list" class="settings-provider-list"></div>
+
+                                <form id="settings-provider-form" class="settings-provider-form" hidden>
+                                    <div class="settings-form-heading">
+                                        <h3 id="settings-provider-form-title">Provider</h3>
+                                        <button class="btn btn-ghost" id="settings-provider-cancel" type="button">Close</button>
+                                    </div>
+                                    <div class="settings-form-grid">
+                                        <label class="settings-field" for="settings-provider-id">
+                                            <span>Provider ID</span>
+                                            <input id="settings-provider-id" class="settings-input" autocomplete="off" placeholder="my-provider" pattern="[a-z0-9][a-z0-9._-]{0,63}" required />
+                                        </label>
+                                        <label class="settings-field" for="settings-provider-name">
+                                            <span>Display name</span>
+                                            <input id="settings-provider-name" class="settings-input" autocomplete="off" placeholder="My Provider" required />
+                                        </label>
+                                        <label class="settings-field" for="settings-provider-kind">
+                                            <span>API type</span>
+                                            <select id="settings-provider-kind" class="settings-input">
+                                                <option value="openai_compatible">OpenAI-compatible</option>
+                                                <option value="codex_oauth">Codex OAuth</option>
+                                                <option value="openai">OpenAI</option>
+                                                <option value="openrouter">OpenRouter</option>
+                                                <option value="anthropic">Anthropic</option>
+                                                <option value="gemini">Google Gemini</option>
+                                                <option value="minimax">MiniMax</option>
+                                                <option value="glm">GLM</option>
+                                                <option value="kimi">Kimi</option>
+                                            </select>
+                                        </label>
+                                        <label class="settings-field" for="settings-provider-billing">
+                                            <span>Billing category</span>
+                                            <select id="settings-provider-billing" class="settings-input">
+                                                <option value="unknown">Unknown</option>
+                                                <option value="free">Free</option>
+                                                <option value="free_rate_limited">Free, rate limited</option>
+                                                <option value="trial_credit">Trial credit</option>
+                                                <option value="local">Local</option>
+                                                <option value="paid">Paid</option>
+                                            </select>
+                                        </label>
+                                        <label class="settings-field settings-field-wide" for="settings-provider-base-url">
+                                            <span>Base URL</span>
+                                            <input id="settings-provider-base-url" class="settings-input" type="url" autocomplete="off" placeholder="https://api.example.com/v1" required />
+                                        </label>
+                                        <label class="settings-field settings-field-wide" for="settings-provider-capabilities">
+                                            <span>Capabilities</span>
+                                            <input id="settings-provider-capabilities" class="settings-input" autocomplete="off" placeholder="text, images, files, tools, reasoning" />
+                                        </label>
+                                        <label class="settings-field settings-field-wide" for="settings-provider-models">
+                                            <span>Manual model IDs</span>
+                                            <textarea id="settings-provider-models" class="settings-input settings-provider-models" rows="4" placeholder="model-name&#10;organisation/model-name"></textarea>
+                                            <small class="settings-key-status">One model ID per line. These remain usable when the provider has no <code>/models</code> endpoint. A successful connection test refreshes the list.</small>
+                                        </label>
+                                        <label class="settings-field settings-field-wide" for="settings-provider-api-key">
+                                            <span>API key</span>
+                                            <input id="settings-provider-api-key" class="settings-input" type="password" autocomplete="new-password" placeholder="Leave blank to keep the saved or environment key" />
+                                            <small id="settings-provider-key-status" class="settings-key-status">No key loaded into this form.</small>
+                                        </label>
+                                    </div>
+                                    <div class="settings-provider-switches">
+                                        <label><input id="settings-provider-enabled" type="checkbox" checked /> Enabled</label>
+                                        <label><input id="settings-provider-clear-key" type="checkbox" /> Remove saved key</label>
+                                    </div>
+                                    <div class="settings-form-actions">
+                                        <button class="btn btn-danger" id="settings-provider-delete" type="button">Remove saved provider</button>
+                                        <span class="settings-form-spacer"></span>
+                                        <button class="btn" id="settings-provider-test" type="button">Test connection</button>
+                                        <button class="btn btn-primary" id="settings-provider-save" type="submit">Save provider</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </section>
+
+                        <!-- Codex OAuth API Keys -->
+                        <section class="settings-section settings-section-wide">
+                            <div class="settings-section-header">
+                                <h2 class="settings-section-title">Codex OAuth API Keys</h2>
+                                <p class="settings-section-subtitle">Issue revocable keys for the OpenAI-compatible model API. Each key is restricted to the <code>codex-oauth</code> provider and uses the local Codex CLI login.</p>
+                            </div>
+                            <div class="settings-section-body">
+                                <div id="settings-codex-key-status" class="settings-inline-status" role="status" aria-live="polite"></div>
+                                <div class="settings-form-grid">
+                                    <label class="settings-field" for="settings-codex-key-name">
+                                        <span>Key name</span>
+                                        <input id="settings-codex-key-name" class="settings-input" maxlength="80" autocomplete="off" placeholder="OpenWebUI" />
+                                    </label>
+                                    <label class="settings-field" for="settings-codex-key-expires">
+                                        <span>Expires</span>
+                                        <input id="settings-codex-key-expires" class="settings-input" type="datetime-local" />
+                                        <small class="settings-key-status">Optional. Uses this browser's local time.</small>
+                                    </label>
+                                    <fieldset class="settings-codex-key-scopes settings-field-wide">
+                                        <legend>Scopes</legend>
+                                        <label><input id="settings-codex-key-scope-models" type="checkbox" checked /> Read models</label>
+                                        <label><input id="settings-codex-key-scope-responses" type="checkbox" checked /> Create responses</label>
+                                    </fieldset>
+                                </div>
+                                <div class="settings-form-actions">
+                                    <span class="settings-form-spacer"></span>
+                                    <button class="btn btn-primary" id="settings-codex-key-create" type="button">Create API key</button>
+                                </div>
+
+                                <div id="settings-codex-key-created" class="settings-codex-key-created" hidden>
+                                    <strong>Copy this key now. It cannot be shown again.</strong>
+                                    <div class="settings-codex-key-secret">
+                                        <input id="settings-codex-key-value" class="settings-input" type="text" readonly autocomplete="off" aria-label="New Codex OAuth API key" />
+                                        <button class="btn" id="settings-codex-key-copy" type="button">Copy</button>
+                                        <button class="btn btn-ghost" id="settings-codex-key-dismiss" type="button">Dismiss</button>
+                                    </div>
+                                </div>
+
+                                <div id="settings-codex-key-list" class="settings-codex-key-list"></div>
+                            </div>
+                        </section>
+
+                        <!-- Chat Defaults -->
+                        <section class="settings-section settings-section-wide">
+                            <div class="settings-section-header">
+                                <h2 class="settings-section-title">Chat Defaults</h2>
+                                <p class="settings-section-subtitle">Defaults for new harness sessions. Per-chat controls can override generation settings.</p>
+                            </div>
+                            <div class="settings-section-body">
+                                <label class="settings-field" for="settings-system-prompt-input">
+                                    <span>Default system prompt</span>
+                                    <textarea id="settings-system-prompt-input" class="settings-input settings-system-prompt" rows="9" placeholder="Instructions applied to new chat sessions"></textarea>
+                                </label>
+                                <div class="settings-default-grid">
+                                    <label class="settings-field" for="settings-chat-temperature">
+                                        <span>Temperature</span>
+                                        <input id="settings-chat-temperature" class="settings-input" type="number" min="0" max="2" step="0.1" placeholder="Provider default" />
+                                    </label>
+                                    <label class="settings-field" for="settings-chat-max-output">
+                                        <span>Max output tokens</span>
+                                        <input id="settings-chat-max-output" class="settings-input" type="number" min="1" max="1000000" step="1" />
+                                    </label>
+                                    <label class="settings-field" for="settings-chat-max-rounds">
+                                        <span>Max tool rounds</span>
+                                        <input id="settings-chat-max-rounds" class="settings-input" type="number" min="1" max="20" step="1" />
+                                    </label>
+                                    <label class="settings-field" for="settings-chat-reasoning-effort">
+                                        <span>Reasoning effort</span>
+                                        <select id="settings-chat-reasoning-effort" class="settings-input">
+                                            <option value="">Provider default</option>
+                                            <option value="minimal">Minimal</option>
+                                            <option value="low">Low</option>
+                                            <option value="medium">Medium</option>
+                                            <option value="high">High</option>
+                                        </select>
+                                    </label>
+                                </div>
+                                <div class="settings-provider-switches">
+                                    <label><input id="settings-chat-reasoning" type="checkbox" /> Request reasoning</label>
+                                    <label><input id="settings-chat-management-tools" type="checkbox" /> Allow MCPO management tools by default</label>
+                                </div>
+                                <div class="settings-form-actions">
+                                    <span id="settings-system-prompt-status" class="settings-inline-status" role="status" aria-live="polite"></span>
+                                    <span class="settings-form-spacer"></span>
+                                    <button class="btn btn-primary" id="settings-system-prompt-save" type="button">Save chat defaults</button>
+                                </div>
+                            </div>
+                        </section>
+
                         <!-- Code Mode -->
                         <div class="settings-section">
                             <div class="settings-section-header">
@@ -309,7 +700,7 @@
                                         </div>
                                     </div>
                                     <div class="settings-row-control">
-                                        <div class="toggle" id="settings-code-mode-toggle"></div>
+                                        <button class="toggle" id="settings-code-mode-toggle" type="button" aria-label="Enable Code Mode" aria-pressed="false"></button>
                                     </div>
                                 </div>
                                 <div class="settings-hint" id="settings-code-mode-hint">
@@ -326,9 +717,9 @@
                             <div class="settings-section-body">
                                 <div class="settings-row">
                                     <div class="settings-row-info">
-                                        <div class="settings-row-label">API Key</div>
+                                        <div class="settings-row-label">MCPO access key</div>
                                         <div class="settings-row-description">
-                                            Set the API key for authenticating requests to this UI. Stored in your browser only.
+                                            Authenticate this browser to MCPO. Provider credentials are managed separately above.
                                         </div>
                                     </div>
                                     <div class="settings-row-control settings-row-control-wide">
@@ -390,14 +781,15 @@
 
     <!-- Modular JavaScript -->
     <script src="/ui/js/core/theme.js?v=20250930222949"></script>
-    <script src="/ui/js/core/api.js?v=20250930222949"></script>
+    <script src="/ui/js/core/api.js?v=20260721"></script>
+    <script src="/ui/js/core/rest-tools.js?v=20260721"></script>
     <script src="/ui/js/core/logs.js?v=20250930232705"></script>
     <script src="/ui/js/components/navigation.js?v=20250930222949"></script>
     <script src="/ui/js/components/servers.js?v=20250930222949"></script>
     <script src="/ui/js/pages/config.js?v=20250930222949"></script>
-    <script src="/ui/js/pages/skills.js?v=20260211"></script>
-    <script src="/ui/js/pages/chat.js?v=20250930222949"></script>
-    <script src="/ui/js/pages/settings.js?v=20260226"></script>
+    <script src="/ui/js/pages/skills.js?v=20260721"></script>
+    <script src="/ui/js/pages/chat.js?v=202607211730"></script>
+    <script src="/ui/js/pages/settings.js?v=20260722"></script>
     <script src="/ui/js/core/globals.js?v=20250930222949"></script>
     <script src="/ui/js/core/app.js?v=20250930222949"></script>
 

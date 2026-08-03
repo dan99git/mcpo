@@ -120,6 +120,8 @@ def main(
     except Exception as e:
         pass
 
+    api_key = api_key or os.getenv("MCPO_API_KEY")
+
     # Whatever the prefix is, make sure it starts and ends with a /
     if path_prefix is None:
         # Set default value

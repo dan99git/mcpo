@@ -44,6 +44,402 @@ def _json(obj: Any) -> str:
     """Compact JSON serialization."""
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
 
+
+def _required_string(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise OpenAIError(f"{label} must be a non-empty string")
+    return value
+
+
+def _responses_file_block(block: Dict[str, Any]) -> Dict[str, Any]:
+    source = block.get("file") if block.get("type") == "file" else block
+    if not isinstance(source, dict):
+        raise OpenAIError("Responses file content must contain a 'file' object")
+
+    source_keys = [
+        key
+        for key in ("file_data", "file_id", "file_url")
+        if source.get(key) is not None
+    ]
+    if len(source_keys) != 1:
+        raise OpenAIError(
+            "Responses file content must provide exactly one of "
+            "file_data, file_id, or file_url"
+        )
+
+    source_key = source_keys[0]
+    result: Dict[str, Any] = {
+        "type": "input_file",
+        source_key: _required_string(
+            source[source_key], f"Responses {source_key}"
+        ),
+    }
+    if source.get("filename") is not None:
+        result["filename"] = _required_string(
+            source["filename"], "Responses filename"
+        )
+    return result
+
+
+def _responses_input_content(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    if not isinstance(content, list):
+        raise OpenAIError(
+            "Responses user content must be a string or an array of content blocks"
+        )
+
+    mapped: List[Dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict):
+            raise OpenAIError(
+                f"Responses content block {index} must be an object"
+            )
+        block_type = block.get("type")
+        if block_type in ("text", "input_text"):
+            text = block.get("text")
+            if not isinstance(text, str):
+                raise OpenAIError(
+                    f"Responses text block {index} must contain string text"
+                )
+            mapped.append({"type": "input_text", "text": text})
+            continue
+
+        if block_type in ("image_url", "input_image"):
+            image = block.get("image_url")
+            detail = block.get("detail")
+            if isinstance(image, dict):
+                detail = image.get("detail", detail)
+                image = image.get("url")
+
+            result: Dict[str, Any] = {"type": "input_image"}
+            if image is not None:
+                result["image_url"] = _required_string(
+                    image, f"Responses image block {index} URL"
+                )
+            elif block.get("file_id") is not None:
+                result["file_id"] = _required_string(
+                    block["file_id"], f"Responses image block {index} file_id"
+                )
+            else:
+                raise OpenAIError(
+                    f"Responses image block {index} needs image_url or file_id"
+                )
+            if detail is not None:
+                if detail not in ("auto", "low", "high"):
+                    raise OpenAIError(
+                        f"Responses image block {index} has invalid detail '{detail}'"
+                    )
+                result["detail"] = detail
+            mapped.append(result)
+            continue
+
+        if block_type in ("file", "input_file"):
+            mapped.append(_responses_file_block(block))
+            continue
+
+        raise OpenAIError(
+            f"Unsupported Responses content block type '{block_type}' at index {index}"
+        )
+
+    if not mapped:
+        raise OpenAIError("Responses content must contain at least one block")
+    return mapped
+
+
+def _responses_assistant_content(content: Any) -> List[Dict[str, Any]]:
+    if content is None or content == "":
+        return []
+    if isinstance(content, str):
+        return [{"type": "input_text", "text": content}]
+    if not isinstance(content, list):
+        raise OpenAIError(
+            "Responses assistant content must be a string or an array of text blocks"
+        )
+
+    mapped: List[Dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict):
+            raise OpenAIError(
+                f"Responses assistant content block {index} must be an object"
+            )
+        block_type = block.get("type")
+        if block_type not in ("text", "input_text", "output_text"):
+            raise OpenAIError(
+                "Unsupported Responses assistant content block type "
+                f"'{block_type}' at index {index}"
+            )
+        text = block.get("text")
+        if not isinstance(text, str):
+            raise OpenAIError(
+                f"Responses assistant text block {index} must contain string text"
+            )
+        mapped.append({"type": "input_text", "text": text})
+    return mapped
+
+
+def _responses_function_tools(
+    tools: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    mapped: List[Dict[str, Any]] = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            raise OpenAIError(f"Responses tool {index} must be an object")
+        if tool.get("type") != "function":
+            mapped.append(dict(tool))
+            continue
+
+        function = tool.get("function")
+        if function is None:
+            function = tool
+        if not isinstance(function, dict):
+            raise OpenAIError(
+                f"Responses function tool {index} must contain a function object"
+            )
+
+        result: Dict[str, Any] = {
+            "type": "function",
+            "name": _required_string(
+                function.get("name"), f"Responses function tool {index} name"
+            ),
+            "parameters": function.get("parameters", {}),
+        }
+        if function.get("description") is not None:
+            result["description"] = function["description"]
+        strict = function.get("strict", tool.get("strict"))
+        if strict is not None:
+            result["strict"] = strict
+        mapped.append(result)
+    return mapped
+
+
+class _ResponsesStreamNormalizer:
+    def __init__(
+        self,
+        message_id: str,
+        model: str,
+        *,
+        created: Optional[int] = None,
+    ) -> None:
+        self.message_id = message_id
+        self.model = model
+        self.created = int(time.time()) if created is None else created
+        self.finished = False
+        self.saw_tool_call = False
+        self.reasoning_item_id: Optional[str] = None
+        self._tool_calls: Dict[str, Dict[str, Any]] = {}
+
+    def _chunk(
+        self,
+        delta: Dict[str, Any],
+        finish_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return {
+            "id": self.message_id,
+            "object": "chat.completion.chunk",
+            "created": self.created,
+            "model": self.model,
+            "choices": [{
+                "index": 0,
+                "delta": delta,
+                "finish_reason": finish_reason,
+            }],
+        }
+
+    @staticmethod
+    def _stream_error(event: Dict[str, Any]) -> OpenAIError:
+        response = event.get("response")
+        error = event.get("error")
+        if error is None and isinstance(response, dict):
+            error = response.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("code")
+        else:
+            message = error
+        if not message:
+            message = event.get("message") or event.get("type") or "unknown error"
+        return OpenAIError(
+            f"OpenAI Responses stream error: {message}",
+            body=event,
+        )
+
+    def _tool_state(
+        self,
+        item_id: str,
+    ) -> Dict[str, Any]:
+        state = self._tool_calls.setdefault(
+            item_id,
+            {
+                "index": len(self._tool_calls),
+                "call_id": None,
+                "name": None,
+                "announced": False,
+                "arguments_emitted": False,
+            },
+        )
+        return state
+
+    def feed(self, event: Dict[str, Any]) -> List[Dict[str, Any]]:
+        if not isinstance(event, dict):
+            raise OpenAIError("OpenAI Responses stream event must be an object")
+
+        event_type = event.get("type")
+        if event_type == "response.output_text.delta":
+            delta = event.get("delta", "")
+            if not isinstance(delta, str):
+                raise OpenAIError("Responses output text delta must be a string")
+            return [self._chunk({"content": delta})] if delta else []
+
+        if event_type in (
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ):
+            delta = event.get("delta", "")
+            if not isinstance(delta, str):
+                raise OpenAIError("Responses reasoning delta must be a string")
+            return [self._chunk({"reasoning_content": delta})] if delta else []
+
+        if event_type == "response.output_item.added":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                return []
+            if item.get("type") == "reasoning":
+                item_id = item.get("id")
+                if isinstance(item_id, str) and item_id:
+                    self.reasoning_item_id = item_id
+                return []
+            if item.get("type") != "function_call":
+                return []
+
+            item_id = _required_string(
+                item.get("id") or event.get("item_id"),
+                "Responses streamed function item id",
+            )
+            call_id = _required_string(
+                item.get("call_id"), "Responses streamed function call_id"
+            )
+            name = _required_string(
+                item.get("name"), "Responses streamed function name"
+            )
+            arguments = item.get("arguments", "")
+            if not isinstance(arguments, str):
+                raise OpenAIError(
+                    "Responses streamed function arguments must be a string"
+                )
+            state = self._tool_state(item_id)
+            state.update({
+                "call_id": call_id,
+                "name": name,
+                "announced": True,
+                "arguments_emitted": bool(arguments),
+            })
+            self.saw_tool_call = True
+            return [self._chunk({
+                "tool_calls": [{
+                    "index": state["index"],
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": name, "arguments": arguments},
+                }]
+            })]
+
+        if event_type == "response.function_call_arguments.delta":
+            item_id = _required_string(
+                event.get("item_id"), "Responses function argument item_id"
+            )
+            delta = event.get("delta", "")
+            if not isinstance(delta, str):
+                raise OpenAIError(
+                    "Responses function argument delta must be a string"
+                )
+            if not delta:
+                return []
+            state = self._tool_state(item_id)
+            state["arguments_emitted"] = True
+            self.saw_tool_call = True
+            return [self._chunk({
+                "tool_calls": [{
+                    "index": state["index"],
+                    "function": {"arguments": delta},
+                }]
+            })]
+
+        if event_type == "response.function_call_arguments.done":
+            item_id = _required_string(
+                event.get("item_id"), "Responses completed function item_id"
+            )
+            state = self._tool_state(item_id)
+            call_id = event.get("call_id") or state.get("call_id")
+            name = event.get("name") or state.get("name")
+            arguments = event.get("arguments", "")
+            if not isinstance(arguments, str):
+                raise OpenAIError(
+                    "Responses completed function arguments must be a string"
+                )
+            self.saw_tool_call = True
+
+            if not state["announced"]:
+                call_id = _required_string(
+                    call_id, "Responses completed function call_id"
+                )
+                name = _required_string(name, "Responses completed function name")
+                state.update({
+                    "call_id": call_id,
+                    "name": name,
+                    "announced": True,
+                    "arguments_emitted": bool(arguments),
+                })
+                return [self._chunk({
+                    "tool_calls": [{
+                        "index": state["index"],
+                        "id": call_id,
+                        "type": "function",
+                        "function": {"name": name, "arguments": arguments},
+                    }]
+                })]
+
+            if arguments and not state["arguments_emitted"]:
+                state["arguments_emitted"] = True
+                return [self._chunk({
+                    "tool_calls": [{
+                        "index": state["index"],
+                        "function": {"arguments": arguments},
+                    }]
+                })]
+            return []
+
+        if event_type in ("error", "response.failed", "response.cancelled"):
+            self.finished = True
+            raise self._stream_error(event)
+
+        if event_type in ("response.completed", "response.incomplete"):
+            if self.finished:
+                return []
+            chunks: List[Dict[str, Any]] = []
+            if self.reasoning_item_id:
+                chunks.append(self._chunk({
+                    "provider_specific": {
+                        "reasoning_item_id": self.reasoning_item_id
+                    }
+                }))
+
+            finish_reason = "tool_calls" if self.saw_tool_call else "stop"
+            if event_type == "response.incomplete":
+                response = event.get("response")
+                details = (
+                    response.get("incomplete_details", {})
+                    if isinstance(response, dict)
+                    else {}
+                )
+                if details.get("reason") == "max_output_tokens":
+                    finish_reason = "length"
+            chunks.append(self._chunk({}, finish_reason))
+            self.finished = True
+            return chunks
+
+        return []
+
+
 def _is_reasoning_model(model: str) -> bool:
     """
     Check if model is a reasoning model that uses max_completion_tokens 
@@ -306,19 +702,45 @@ class OpenAIClient:
         
         for output in outputs:
             output_type = output.get("type")
-            
-            if output_type == "text":
+
+            if output_type == "message":
+                for block in output.get("content", []):
+                    if not isinstance(block, dict):
+                        continue
+                    if block.get("type") in ("output_text", "text"):
+                        final_text += block.get("text", "")
+
+            elif output_type == "text":
                 final_text += output.get("content", "")
-            
+
             elif output_type == "reasoning":
                 # Reasoning summary (only available with Responses API)
-                reasoning_summary += output.get("summary", "")
+                summary = output.get("summary", "")
+                if isinstance(summary, list):
+                    reasoning_summary += "".join(
+                        item.get("text", "")
+                        for item in summary
+                        if isinstance(item, dict)
+                        and item.get("type") == "summary_text"
+                    )
+                elif isinstance(summary, str):
+                    reasoning_summary += summary
                 reasoning_item_id = output.get("id")
-            
+
+            elif output_type == "function_call":
+                tool_calls.append({
+                    "id": output.get("call_id") or output.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": output.get("name", ""),
+                        "arguments": output.get("arguments", "{}")
+                    }
+                })
+
             elif output_type == "tool_call":
                 fn = output.get("function", {})
                 tool_calls.append({
-                    "id": output.get("id"),
+                    "id": output.get("call_id") or output.get("id"),
                     "type": "function",
                     "function": {
                         "name": fn.get("name", ""),
@@ -433,20 +855,97 @@ class OpenAIClient:
         **kwargs: Any
     ) -> Dict[str, Any]:
         """Prepare body for Responses API."""
-        # Build input as a list of message objects for multi-turn context
-        input_messages = []
-        instructions = None
-        for msg in messages:
+        input_items: List[Dict[str, Any]] = []
+        instruction_parts: List[str] = []
+        for message_index, msg in enumerate(messages):
             role = msg.get("role", "")
-            if role in ["system", "developer"]:
-                # Extract instructions from system/developer messages
-                if instructions is None:
-                    instructions = msg.get("content", "")
+            content = msg.get("content")
+
+            if role in ("system", "developer"):
+                if not isinstance(content, str):
+                    raise OpenAIError(
+                        f"Responses {role} message {message_index} content must be text"
+                    )
+                if content:
+                    instruction_parts.append(content)
                 continue
-            input_messages.append({"role": role, "content": msg.get("content", "")})
-        
+
+            if role == "user":
+                input_items.append({
+                    "type": "message",
+                    "role": "user",
+                    "content": _responses_input_content(content),
+                })
+                continue
+
+            if role == "assistant":
+                assistant_content = _responses_assistant_content(content)
+                if assistant_content:
+                    input_items.append({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": assistant_content,
+                    })
+
+                tool_calls = msg.get("tool_calls") or []
+                if not isinstance(tool_calls, list):
+                    raise OpenAIError(
+                        f"Responses assistant message {message_index} tool_calls must be an array"
+                    )
+                for tool_index, tool_call in enumerate(tool_calls):
+                    if not isinstance(tool_call, dict):
+                        raise OpenAIError(
+                            f"Responses tool call {tool_index} must be an object"
+                        )
+                    if tool_call.get("type") not in (None, "function"):
+                        raise OpenAIError(
+                            "Unsupported Responses assistant tool call type "
+                            f"'{tool_call.get('type')}'"
+                        )
+                    function = tool_call.get("function")
+                    if not isinstance(function, dict):
+                        raise OpenAIError(
+                            f"Responses tool call {tool_index} needs a function object"
+                        )
+                    arguments = function.get("arguments", "{}")
+                    if not isinstance(arguments, str):
+                        if isinstance(arguments, (dict, list)):
+                            arguments = _json(arguments)
+                        else:
+                            raise OpenAIError(
+                                f"Responses tool call {tool_index} arguments must be JSON text"
+                            )
+                    input_items.append({
+                        "type": "function_call",
+                        "call_id": _required_string(
+                            tool_call.get("id"),
+                            f"Responses tool call {tool_index} id",
+                        ),
+                        "name": _required_string(
+                            function.get("name"),
+                            f"Responses tool call {tool_index} name",
+                        ),
+                        "arguments": arguments,
+                    })
+                continue
+
+            if role == "tool":
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": _required_string(
+                        msg.get("tool_call_id") or msg.get("id"),
+                        f"Responses tool result {message_index} call id",
+                    ),
+                    "output": _as_json_str(content),
+                })
+                continue
+
+            raise OpenAIError(
+                f"Unsupported Responses message role '{role}' at index {message_index}"
+            )
+
         # Fallback: if no non-system messages, use empty string
-        input_content = input_messages if input_messages else ""
+        input_content = input_items if input_items else ""
 
         body: Dict[str, Any] = {
             "model": model,
@@ -454,8 +953,8 @@ class OpenAIClient:
             "max_output_tokens": max_tokens
         }
 
-        if instructions:
-            body["instructions"] = instructions
+        if instruction_parts:
+            body["instructions"] = "\n\n".join(instruction_parts)
 
         # Reasoning configuration
         if reasoning_effort or reasoning_summary:
@@ -482,7 +981,7 @@ class OpenAIClient:
 
         # Tools
         if tools:
-            body["tools"] = list(tools)
+            body["tools"] = _responses_function_tools(tools)
 
         return body
 
@@ -622,13 +1121,22 @@ class OpenAIClient:
 
                             message_id = f"openai-{uuid.uuid4().hex}"
                             finish_seen = False
-                            reasoning_item_id = None
+                            created = int(time.time())
+                            responses_normalizer = (
+                                _ResponsesStreamNormalizer(
+                                    message_id,
+                                    model,
+                                    created=created,
+                                )
+                                if use_responses_api
+                                else None
+                            )
 
                             # Initial role chunk
                             initial = {
                                 "id": message_id,
                                 "object": "chat.completion.chunk",
-                                "created": int(time.time()),
+                                "created": created,
                                 "model": model,
                                 "choices": [{
                                     "index": 0,
@@ -652,73 +1160,13 @@ class OpenAIClient:
                                     continue
 
                                 if use_responses_api:
-                                    # Responses API streaming
-                                    delta = chunk_data.get("delta", {})
-                                    
-                                    if delta.get("type") == "text":
-                                        chunk = {
-                                            "id": message_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": int(time.time()),
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {"content": delta.get("content", "")},
-                                                "finish_reason": None
-                                            }]
-                                        }
+                                    if responses_normalizer is None:
+                                        raise OpenAIError(
+                                            "Responses stream normalizer was not initialized"
+                                        )
+                                    for chunk in responses_normalizer.feed(chunk_data):
                                         yield f"data: {_json(chunk)}\n\n"
-                                    
-                                    elif delta.get("type") == "reasoning":
-                                        reasoning_summary = delta.get("summary", "")
-                                        reasoning_item_id = delta.get("id")
-                                        
-                                        chunk = {
-                                            "id": message_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": int(time.time()),
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {"reasoning_content": reasoning_summary},
-                                                "finish_reason": None
-                                            }]
-                                        }
-                                        yield f"data: {_json(chunk)}\n\n"
-                                    
-                                    elif chunk_data.get("status") == "completed":
-                                        finish_seen = True
-                                        
-                                        if reasoning_item_id:
-                                            sig_chunk = {
-                                                "id": message_id,
-                                                "object": "chat.completion.chunk",
-                                                "created": int(time.time()),
-                                                "model": model,
-                                                "choices": [{
-                                                    "index": 0,
-                                                    "delta": {
-                                                        "provider_specific": {
-                                                            "reasoning_item_id": reasoning_item_id
-                                                        }
-                                                    },
-                                                    "finish_reason": None
-                                                }]
-                                            }
-                                            yield f"data: {_json(sig_chunk)}\n\n"
-                                        
-                                        finish_chunk = {
-                                            "id": message_id,
-                                            "object": "chat.completion.chunk",
-                                            "created": int(time.time()),
-                                            "model": model,
-                                            "choices": [{
-                                                "index": 0,
-                                                "delta": {},
-                                                "finish_reason": "stop"
-                                            }]
-                                        }
-                                        yield f"data: {_json(finish_chunk)}\n\n"
+                                    finish_seen = responses_normalizer.finished
                                 else:
                                     # Chat Completions API streaming
                                     choices = chunk_data.get("choices", [])
@@ -748,6 +1196,12 @@ class OpenAIClient:
                                         finish_seen = True
 
                             if not finish_seen:
+                                finish_reason = "stop"
+                                if (
+                                    responses_normalizer is not None
+                                    and responses_normalizer.saw_tool_call
+                                ):
+                                    finish_reason = "tool_calls"
                                 finish_chunk = {
                                     "id": message_id,
                                     "object": "chat.completion.chunk",
@@ -756,7 +1210,7 @@ class OpenAIClient:
                                     "choices": [{
                                         "index": 0,
                                         "delta": {},
-                                        "finish_reason": "stop"
+                                        "finish_reason": finish_reason
                                     }]
                                 }
                                 yield f"data: {_json(finish_chunk)}\n\n"

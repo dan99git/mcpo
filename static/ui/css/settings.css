@@ -1,7 +1,8 @@
 /* MCPO Settings Page Styles */
 
 .settings-layout {
-    max-width: 720px;
+    width: 100%;
+    max-width: 1080px;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -33,6 +34,344 @@
     font-weight: 600;
     color: var(--text-primary);
     margin: 0;
+}
+
+.settings-section-subtitle {
+    margin-top: 4px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.settings-header-row,
+.settings-form-heading,
+.settings-form-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.settings-inline-status {
+    min-height: 18px;
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+.settings-inline-status.error {
+    color: var(--error);
+}
+
+.settings-inline-status.success {
+    color: var(--success);
+}
+
+.settings-provider-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 10px;
+    min-width: 0;
+}
+
+.settings-provider-card {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.settings-provider-card.is-configured {
+    border-left: 3px solid var(--success);
+}
+
+.settings-provider-card.is-disabled {
+    opacity: 0.7;
+}
+
+.settings-provider-card-header,
+.settings-provider-card-actions,
+.settings-provider-badges {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.settings-provider-card-header {
+    justify-content: space-between;
+}
+
+.settings-provider-card-title {
+    min-width: 0;
+}
+
+.settings-provider-card-title strong,
+.settings-provider-card-title span {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.settings-provider-card-title strong {
+    color: var(--text-primary);
+    font-size: 13px;
+}
+
+.settings-provider-card-title span,
+.settings-provider-meta {
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.settings-provider-meta {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.settings-provider-badges {
+    flex-wrap: wrap;
+}
+
+.settings-provider-badge {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    font-size: 9px;
+    line-height: 1.5;
+}
+
+.settings-provider-badge.configured,
+.settings-provider-badge.free,
+.settings-provider-badge.local {
+    background: rgba(16, 163, 127, 0.13);
+    color: #08745b;
+}
+
+.settings-provider-badge.environment {
+    background: rgba(37, 99, 235, 0.12);
+    color: #1d4ed8;
+}
+
+.settings-provider-card-actions {
+    margin-top: auto;
+}
+
+.settings-provider-card-actions .btn {
+    flex: 1;
+}
+
+.settings-provider-form {
+    margin-top: 16px;
+    padding: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.settings-provider-form[hidden] {
+    display: none;
+}
+
+.settings-form-heading {
+    margin-bottom: 14px;
+}
+
+.settings-form-heading h3 {
+    font-size: 15px;
+}
+
+.settings-form-grid,
+.settings-default-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    min-width: 0;
+}
+
+.settings-default-grid {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    margin-top: 12px;
+}
+
+.settings-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.settings-field-wide {
+    grid-column: 1 / -1;
+}
+
+.settings-field .settings-input {
+    width: 100%;
+    min-width: 0;
+}
+
+.settings-key-status {
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.settings-provider-models {
+    min-height: 92px;
+    resize: vertical;
+    font-family: var(--font-mono, monospace);
+}
+
+.settings-provider-switches {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    margin-top: 14px;
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.settings-provider-switches label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.settings-form-actions {
+    margin-top: 16px;
+}
+
+.settings-form-spacer {
+    flex: 1;
+}
+
+.settings-codex-key-scopes {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 20px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+}
+
+.settings-codex-key-scopes legend {
+    width: 100%;
+    margin-bottom: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.settings-codex-key-scopes label {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.settings-codex-key-created {
+    margin-top: 16px;
+    padding: 14px;
+    border: 1px solid var(--warning);
+    border-radius: 8px;
+    background: color-mix(in oklab, var(--warning) 8%, var(--bg-primary));
+}
+
+.settings-codex-key-created > strong {
+    display: block;
+    margin-bottom: 10px;
+    font-size: 13px;
+    color: var(--text-primary);
+}
+
+.settings-codex-key-secret {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-codex-key-secret .settings-input {
+    min-width: 0;
+    font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.settings-codex-key-list {
+    display: grid;
+    gap: 10px;
+    margin-top: 18px;
+}
+
+.settings-codex-key-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+
+.settings-codex-key-meta {
+    display: grid;
+    gap: 5px;
+    min-width: 0;
+}
+
+.settings-codex-key-meta code {
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+}
+
+.settings-codex-key-meta small {
+    color: var(--text-secondary);
+    line-height: 1.45;
+}
+
+.settings-codex-key-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-codex-key-state {
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.settings-codex-key-state.is-active {
+    background: rgba(16, 163, 127, 0.12);
+    color: var(--accent);
+}
+
+.settings-codex-key-state.is-revoked,
+.settings-codex-key-state.is-expired {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--error);
+}
+
+.settings-codex-key-actions {
+    flex-shrink: 0;
+}
+
+.settings-system-prompt {
+    width: 100%;
+    min-height: 180px;
+    resize: vertical;
+    line-height: 1.5;
 }
 
 .settings-section-danger .settings-section-title {
@@ -76,6 +415,17 @@
     padding-top: 2px;
 }
 
+#settings-code-mode-toggle {
+    appearance: none;
+    padding: 0;
+    border: 0;
+}
+
+#settings-code-mode-toggle:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
 .settings-row-control-wide {
     min-width: 320px;
 }
@@ -112,6 +462,15 @@
 }
 
 @media (max-width: 768px) {
+    .settings-layout,
+    .settings-section,
+    .settings-section-body,
+    .settings-provider-form {
+        width: 100%;
+        min-width: 0;
+        max-width: 100%;
+    }
+
     .settings-row {
         flex-direction: column;
         gap: 12px;
@@ -119,6 +478,42 @@
 
     .settings-row-control-wide {
         min-width: 0;
+        width: 100%;
+    }
+
+    .settings-header-row,
+    .settings-form-heading,
+    .settings-form-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .settings-provider-list,
+    .settings-form-grid,
+    .settings-default-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .settings-field-wide {
+        grid-column: auto;
+    }
+
+    .settings-form-spacer {
+        display: none;
+    }
+
+    .settings-form-actions .btn {
+        width: 100%;
+    }
+
+    .settings-codex-key-secret,
+    .settings-codex-key-row {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .settings-codex-key-secret .btn,
+    .settings-codex-key-actions .btn {
         width: 100%;
     }
 }

@@ -1,4 +1,4 @@
-﻿# Python-generated files
+# Python-generated files
 __pycache__/
 *.py[oc]
 build/
@@ -18,6 +18,7 @@ mcpo.json.backup
 mcpo.local*.json
 *_state.json
 *_state.json.tmp
+*_state.json.lock
 
 # Environment & secrets
 .env
@@ -43,3 +44,12 @@ Desktop.ini
 # Logs
 *.log
 logs/
+
+# Local MCP Node tool installs
+tools/mcp-node-tools/
+
+# Isolated CLI package environments
+.mcpo/
+
+# Managed skill package installs
+skills/installed/

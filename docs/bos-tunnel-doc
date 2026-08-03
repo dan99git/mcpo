@@ -1,0 +1,861 @@
+ the client-to-vendor tunnel is an implemented application relay, not a VPN and not a client-side port-
+  forward. The client makes an outbound WebSocket connection. It exposes no public port.
+
+  It is not operational end-to-end on this machine today, and the real public Cloudflare/AI path has not been
+  proven.
+
+  ## Request path
+
+  ChatGPT / Claude / MCP client
+    POST https://<site_id>.ai.lighting/mcp
+          |
+          v
+  Cloudflare exact hostname route
+          |
+          v
+  Vendor 127.0.0.1:<site_id>/mcp
+          |
+          v
+  Vendor in-memory broker
+          |
+          v
+  Existing outbound WSS session to client
+          |
+          v
+  Client 127.0.0.1:<site_id>/mcp
+          |
+          v
+  Local FastMCP 127.0.0.1:7087/mcp
+          |
+          v
+  Site gateway 127.0.0.1:7085
+          |
+          v
+  Building OS tools / optional pinned BR
+
+  This flow is defined in the /C:/Users/danie/building-os/architecture-docs/15-vendor-remote-access-add-
+  on.md:3, /C:/Users/danie/building-os/tools/bos-vendor-addon/README.md:7, and /C:/Users/danie/building-os/
+  host/runtime/server/VENDOR-RELAY-CONNECTOR.md:9.
+
+  ## What it provides
+
+  - Remote access to the approved Building OS MCP tool catalogue.
+  - No LAN browsing, subnet access, arbitrary device access, shell access, or VPN.
+  - WireGuard remains a separate site-to-site and technician-access system.
+  - Public access keys terminate at the vendor server. They are never forwarded to the client.
+  - The vendor request is converted into a bounded protocol frame and carried through the existing outbound
+    client session.
+
+  - The client injects its separate internal MCP key before forwarding to port 7087.
+  - Tool handlers then call the normal site gateway on port 7085.
+
+  The current checkout’s live catalogue command exposed eight read-only tools without a pinned BR:
+
+  - bos_site_tree
+  - bos_site_overview
+  - bos_space_details
+  - bos_device_details
+  - bos_commissioning_status
+  - bos_diagnostics
+  - bos_br_server_convergence
+  - bos_br_server_placement
+
+  With a pinned BR, the source exposes 19 tools. One possible write, bos_br_joiner_accept, still requires
+  explicit confirmation. The complete canonical catalogue contains 35 tools. See /C:/Users/danie/building-os/
+  host/runtime/chatgpt_mcp/README.md:80.
+
+  ## Enrollment
+
+  1. The vendor administrator creates a one-time enrollment token for the router serial.
+  2. The client reads the live MikroTik serial.
+  3. The client generates its connector private key locally.
+  4. The client sends the token, serial and connector public credential to vendor /enroll.
+  5. The vendor deterministically derives a five-digit site_id from the serial, retrying if the ID is already
+     occupied.
+
+  6. That ID becomes both:
+      - The public hostname label: <site_id>.ai.lighting
+      - The vendor and client loopback routing port.
+
+  7. The vendor stores credential hashes only.
+  8. The client stores its credential using Windows DPAPI under the current user.
+  9. The serial is checked again every connector start.
+
+  Credential roles are deliberately separate:
+
+   Credential          Purpose
+  ━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+   Vendor admin key    Loopback vendor administration
+  ──────────────────  ────────────────────────────────────────────
+   Enrollment token    One-time client enrollment
+  ──────────────────  ────────────────────────────────────────────
+   Connector key       Client-to-vendor WSS session
+  ──────────────────  ────────────────────────────────────────────
+   Site access key     ChatGPT, Claude or other public MCP caller
+  ──────────────────  ────────────────────────────────────────────
+   Local MCP key       Client connector to local port 7087
+
+  Default validity is 365 days for enrollment tokens, 365 days for connector credentials and 90 days for public
+  site keys. See /C:/Users/danie/building-os/tools/bos-vendor-addon/src/vendor/credentials/types.ts:1 and /C:/
+  Users/danie/building-os/host/runtime/server/src/vendor-relay/credential-store.ts:268.
+
+  ## Ports and network boundary
+
+        Port    Location              Purpose
+  ━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+         443    Vendor public host    TLS /enroll and WSS /relay/connect
+  ───────────  ────────────────────  ──────────────────────────────────────────
+          80    Vendor public host    ACME HTTP-01 certificate challenge
+  ───────────  ────────────────────  ──────────────────────────────────────────
+        7089    Vendor loopback       Admin API
+  ───────────  ────────────────────  ──────────────────────────────────────────
+        7088    Vendor loopback       Insecure bench testing only
+  ───────────  ────────────────────  ──────────────────────────────────────────
+   <site_id>    Vendor loopback       Cloudflare origin for that specific site
+  ───────────  ────────────────────  ──────────────────────────────────────────
+   <site_id>    Client loopback       Local connector routing facade
+  ───────────  ────────────────────  ──────────────────────────────────────────
+        7087    Client loopback       FastMCP service
+  ───────────  ────────────────────  ──────────────────────────────────────────
+        7085    Client loopback       Standard BOS site gateway
+
+  Cloudflare is only on the vendor public MCP side. It is not between the client connector and the vendor
+  control endpoint.
+
+  Each active site requires an exact Cloudflare origin route such as:
+
+  44354.ai.lighting -> http://127.0.0.1:44354
+
+  Wildcard DNS alone cannot select a different origin port for each site. The code only generates route rows
+  and configuration snippets. It does not configure or manage cloudflared.
+
+  ## Runtime safeguards
+
+  - One active connector session per site.
+  - Eight in-flight calls per site.
+  - Sixteen in-flight calls across one vendor process by default.
+  - 1 MiB request limit.
+  - 8 MiB response limit.
+  - 30-second heartbeat and 90-second stale-session close.
+  - Requests are not replayed after uncertain dispatch.
+  - Disconnects cancel outstanding work.
+  - Authentication and protocol failures are terminal.
+  - Site access keys are site-bound and currently have only the mcp scope.
+  - Revoking a connector drops its live session.
+  - Revoking a site closes its listener, session and associated credentials.
+
+  The broker and request state are memory-only. A vendor restart loses sessions and in-flight calls.
+
+  ## Current machine state
+
+  Observed during this audit:
+
+  - Nothing was listening on ports 7087, 7088 or 7089.
+  - Client connector metadata returned {"state":"missing"}.
+  - The pinned FastMCP runtime was absent.
+  - Task Scheduler queries returned query_failed. That does not prove the tasks are unregistered.
+  - The default Python has FastMCP 3.1.1, while the repo pins 3.4.4.
+  - The vendor database exists and contains active historical site 44354, with connector and access-key use
+    recorded on 17 July 2026.
+
+  - The vendor service is not currently running.
+  - The private vendor package is missing its installed acme-client dependency.
+
+
+  1. No real two-machine, customer-NAT, public Cloudflare test has been completed.
+  2. No actual ChatGPT or Claude fixed-bearer connection has been proven.
+  3. Cloudflare route provisioning remains manual and external.
+  6. Public caller identity is not propagated into the client-side per-call audit.
+  7. DPAPI credential storage is Windows-only.
+  8. Connector readiness checks FastMCP health, but does not prove the downstream gateway on port 7085 is
+     healthy.
+  These open production boundaries are also recorded in the /C:/Users/danie/building-os/tools/bos-vendor-addon/
+  README.md:309.
+
+  ## Documentation defects
+
+  - The client hosted-tunnel panel exists and has passing tests, but it is not registered in the live TUI
+    navigation. Current F8 navigation registers only ToolingCatalogue: /C:/Users/danie/building-os/host/apps/
+    tui/tui/panels/system_runtime.py:12 and /C:/Users/danie/building-os/host/apps/tui/tui/shell/
+    registry.py:145.
+
+  - Instructions telling operators to use F8 to enroll are currently false.
+  - The vendor README says the vendor TUI is still missing, but the TUI source exists.
+  - Claude plugin documentation implies per-tool roles. Current credentials support only the single mcp scope.
+  - The proposed browser UI, OAuth, cookies and “swipe card” flow exist only in a non-canonical scratch
+    document: /C:/Users/danie/building-os/jobs/26-07-22/scratch-chatgpt-bos-operating-surface.md:3.
+
+  ## Validation
+
+  - Client relay configuration/protocol tests: 57 passed.
+  - Vendor relay tests: 54 passed.
+  - Client hosted-tunnel TUI tests: 46 passed.
+  - Local key-store tests: 7 passed.
+  - Vendor TUI tests: 12 passed.
+  - Four vendor integration suites could not load because acme-client is missing.
+  - Six FastMCP tests failed because the installed version is 3.1.1 instead of the pinned 3.4.4.
+  - No files were changed.
+
+─ Worked for 17m 57s ──────────────────────────────────────────────────────────────────────────────────────────
+
+
+› ok, now i have been worying about the robustness and sec of our adhoc tunell. by chence when i was setting
+  up the gpt plug in, i lesrrned that chst gpt desktop has a native tunell option for http mcp servers.. like
+  freakishly on par with what i needed. a tug of the docs revealed that the entire tunell is actually
+  opensource oand on git hub. can you review it and tell me if this si somethign we can reprupose for our own?
+• Searching the web
+
+• Searched the web for site:developers.openai.com ChatGPT desktop tunnel HTTP MCP server ...
+
+
+› https://github.com/openai/tunnel-client.git
+
+
+• The repository is openai/tunnel-client, Sir. I have confirmed it is OpenAI’s Secure MCP Tunnel client, not an
+  unrelated desktop helper. I am reviewing that exact repository now against the BOS relay.
+
+• Started `/root/openai_tunnel_license`
+
+• Started `/root/bos_tunnel_comparison`
+
+• Ran if (Test-Path -LiteralPath 'C:\tmp\openai-tunnel-client-review-20260722') { 'exists' } else { 'absent' }
+  └ fatal: could not create work tree dir 'C:\tmp\openai-tunnel-client-review-20260722': Permission denied
+
+• Running git clone --depth 1 https://github.com/openai/tunnel-client.git
+  │ C:\tmp\openai-tunnel-client-review-20260722
+
+⚠ Automatic approval review approved (risk: low, authorization: high): The user explicitly asked for a review
+  of that exact public GitHub repository, and a shallow clone to a new local temp directory is a routine low-
+  risk read/inspect action.
+
+✔ Auto-reviewer approved codex to run git clone --depth 1 https://github.com/openai/tunnel-client.git
+  C:\tmp\openai... this time
+
+• Ran git clone --depth 1 https://github.com/openai/tunnel-client.git
+  │ C:\tmp\openai-tunnel-client-review-20260722
+  └ Cloning into 'C:\tmp\openai-tunnel-client-review-20260722'...
+
+• Running git rev-parse HEAD; git status --short --branch; rg --files | Measure-Object | Select-Object
+  │ -ExpandProperty Count; rg --files | Select-Object -First 200
+
+• Ran rg -n -i "tunnel-client|secure mcp tunnel|reverse-tunnel vendor-addon|no-public-port" C:
+  │ \Users\danie\.codex\memories\MEMORY.md
+  └ 933:# Task Group: C:\Users\danie\building-os reverse-tunnel vendor-addon boundary inspection
+    934:scope: use when the user wants the no-public-port tunnel shape clarified, needs the current
+    … +5 lines (ctrl + t to view transcript)
+    onl, updated_at=2026-07-14T06:30:48+00:00, thread_id=019f5c29-614e-7c03-8b62-c641468d7952, strongest source
+    for the no-public-port boundary, vendor-addon package scope, and stop-state handoff)
+
+• Ran git rev-parse HEAD; git status --short --branch; rg --files | Measure-Object | Select-Object
+  │ -ExpandProperty Count; rg --files | Select-Object -First 200
+  └ e288bde76d811e4fc5e2ca076775eab04459c682
+    ## master...origin/master
+    … +201 lines (ctrl + t to view transcript)
+    warning: unable to access 'C:\Users\danie/.config/git/ignore': Permission denied
+    warning: unable to access 'C:\Users\danie/.config/git/ignore': Permission denied
+
+• Ran Get-ChildItem -Force | Select-Object Mode,Length,Name; rg --files internal cmd pkg | Sort-Object
+  └
+    Mode  Length Name
+    … +284 lines (ctrl + t to view transcript)
+
+    rg: internal: The system cannot find the file specified. (os error 2)
+
+• Running Get-Content -Raw -LiteralPath 'docs\protocol.md'
+
+• Running Get-Content -Raw -LiteralPath 'docs\architecture.md'
+
+• Running Get-Content -Raw -LiteralPath 'docs\roadmap.md'
+
+• Running Get-Content -Raw -LiteralPath 'docs\permissions.md'
+
+• Running Get-Content -Raw -LiteralPath 'LICENSE'
+
+• Running Get-Content -Raw -LiteralPath 'README.md'
+
+• Running Get-Content -Raw -LiteralPath 'go.mod'
+
+• Ran Get-Content -Raw -LiteralPath 'docs\protocol.md'
+  └ # Tunnel client wire protocol
+
+    … +412 lines (ctrl + t to view transcript)
+    - Validate fixtures against the OpenAPI document in CI.
+
+
+• Ran Get-Content -Raw -LiteralPath 'docs\architecture.md'
+  └ # Architecture
+
+
+
+• Ran Get-Content -Raw -LiteralPath 'docs\roadmap.md'
+  └ # Roadmap / Design Notes
+
+• Ran Get-Content -Raw -LiteralPath 'go.mod'
+  └ module github.com/openai/tunnel-client
+
+    … +60 lines (ctrl + t to view transcript)
+    )
+    … +364 lines (ctrl + t to view transcript)
+    This project is licensed under the [Apache License 2.0](LICENSE).
+
+
+• Ran Get-Content -Raw -LiteralPath 'docs\permissions.md'
+  └ # Tunnel Permissions, Roles, and Groups
+
+    … +196 lines (ctrl + t to view transcript)
+    only trusted platform admins need Manage and admin-key access.
+
+
+• Ran Get-Content -Raw -LiteralPath 'LICENSE'
+  └                                  Apache License
+                               Version 2.0, January 2004
+    … +184 lines (ctrl + t to view transcript)
+          identification within third-party archives.
+
+
+• Ran Get-Content -Raw -LiteralPath 'NOTICE'
+  └ Copyright 2026 OpenAI
+
+    … +10 lines (ctrl + t to view transcript)
+    Limitations under the License.
+
+
+• Ran Get-Content -Raw -LiteralPath 'docs\architecture.md'
+  └ # Architecture
+
+    … +219 lines (ctrl + t to view transcript)
+      OAuth flow can fail.
+
+
+• Ran $files=@('README.md','docs\protocol.md','docs\connectors.md','docs\configuration.md','docs\development.md
+  │ ','docs\deployment\cloudflared.md'); foreach($f in $files){ $lines=(Get-Content -LiteralPath $f).Count;
+  │ "$f`t$lines" }
+  └ README.md    367
+    docs\protocol.md    415
+    … +2 lines (ctrl + t to view transcript)
+    docs\development.md    104
+    docs\deployment\cloudflared.md    135
+
+• Running $n=0; Get-Content -LiteralPath 'docs\development.md' | ForEach-Object { $n++; if($n -ge 1 -and $n -le
+  │ 104){ '{0,4}: {1}' -f $n,$_ } }
+
+• Running $n=0; Get-Content -LiteralPath 'docs\protocol.md' | ForEach-Object { $n++; if($n -ge 1 -and $n -le
+  │ 220){ '{0,4}: {1}' -f $n,$_ } }
+
+• Running $n=0; Get-Content -LiteralPath 'docs\deployment\cloudflared.md' | ForEach-Object { $n++; if($n -ge 1
+  │ -and $n -le 135){ '{0,4}: {1}' -f $n,$_ } }
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\development.md' | ForEach-Object { $n++; if($n -ge 1 -and $n -le
+  │ 104){ '{0,4}: {1}' -f $n,$_ } }
+     104: - `testsupport/`: test helpers and doubles
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\deployment\cloudflared.md' | ForEach-Object { $n++; if($n -ge 1 -and
+  │ $n -le 135){ '{0,4}: {1}' -f $n,$_ } }
+  └    1: # Bundled Cloudflare Tunnel companion
+       2:
+    … +131 lines (ctrl + t to view transcript)
+     134: package tests. Auto-update stays disabled so the runtime cannot silently drift
+     135: away from the reviewed pin.
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\protocol.md' | ForEach-Object { $n++; if($n -ge 1 -and $n -le 220)
+  │ { '{0,4}: {1}' -f $n,$_ } }
+  └    1: # Tunnel client wire protocol
+       2:
+    … +216 lines (ctrl + t to view transcript)
+     219:   },
+     220:   "resp_code": 200,
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\connectors.md' | ForEach-Object { $n++; if($n -ge 1 -and $n -le 204)
+  │ { '{0,4}: {1}' -f $n,$_ } }
+  └    1: # Connector behavior and onboarding notes
+       2:
+    … +200 lines (ctrl + t to view transcript)
+     203: - Whether GET requests to connector MCP URLs should return a more explicit
+     204:   product-facing diagnostic instead of the current POST-only behavior.
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\protocol.md' | ForEach-Object { $n++; if($n -ge 221 -and $n -le 415)
+  │ { '{0,4}: {1}' -f $n,$_ } }
+  └  221:   "resp_type": "jsonrpc_response"
+     222: }
+    … +191 lines (ctrl + t to view transcript)
+     414: - Ignore unknown JSON fields for forward compatibility.
+     415: - Validate fixtures against the OpenAPI document in CI.
+
+• Ran $n=0; Get-Content -LiteralPath 'docs\connectors.md' | ForEach-Object { $n++; if($n -le 70){ '{0,4}: {1}'
+  │ -f $n,$_ } }
+  └    1: # Connector behavior and onboarding notes
+       2:
+    … +66 lines (ctrl + t to view transcript)
+      69:
+      70: Supported customer MCP transports are:
+
+• Running Get-Content -Raw -LiteralPath 'pkg\controlplane\internal\roundtripper.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\mcpclient\forwarding_transport_impl.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\controlplane\internal\poller.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\httpguard\guard.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\dispatcher\internal\processor.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\dispatcher\internal\queue_listener.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\mcpclient\shared_connection_transport.go'
+
+• Running Get-Content -Raw -LiteralPath 'client.go'
+
+• Running Get-Content -Raw -LiteralPath 'pkg\localproxy\localproxy.go'
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\controlplane\internal\roundtripper.go'
+  └ package internal
+
+    … +140 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\mcpclient\forwarding_transport_impl.go'
+  └ package mcpclient
+
+    … +234 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\controlplane\internal\poller.go'
+  └ package internal
+
+    … +354 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\httpguard\guard.go'
+  └ package httpguard
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\dispatcher\internal\processor.go'
+  └ package dispatcherinternal
+
+    … +1138 lines (ctrl + t to view transcript)
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\dispatcher\internal\queue_listener.go'
+    … +213 lines (ctrl + t to view transcript)
+    }
+    … +353 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\mcpclient\shared_connection_transport.go'
+  └ package mcpclient
+
+    … +92 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\localproxy\localproxy.go'
+  └ package localproxy
+
+    … +1587 lines (ctrl + t to view transcript)
+    }
+
+
+• Ran Get-Content -Raw -LiteralPath 'pkg\controlplane\internal\tunnel_service_client.go'
+  └ package internal
+
+    … +632 lines (ctrl + t to view transcript)
+    // command_parser.go and command_types.go to keep this file focused on HTTP logic.
+
+
+• Ran git show -s --format='%H%n%cI%n%an%n%s' HEAD; git tag --points-at HEAD; git tag --sort=-version:refname |
+  │ Select-Object -First 20; go version
+  └ e288bde76d811e4fc5e2ca076775eab04459c682
+    2026-07-22T00:23:50Z
+    … +6 lines (ctrl + t to view transcript)
+         | The term 'go' is not recognized as a name of a cmdlet, function, script file, or executable program.
+    Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+
+• Searching the web
+
+• Searched the web
+
+• Searching the web
+
+• Searched the web for 'OpenAI-hosted'
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\mcpclient\channel_transport_factory.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\controlplane\internal\poller.go' | ForEach-Object { $n++; '{0,4}:
+  │ {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\mcpclient\headers.go' | ForEach-Object { $n++; '{0,4}: {1}' -f
+  │ $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\dispatcher\internal\processor.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\mcpclient\internal\static_headers.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\mcpclient\transport_provider.go' | ForEach-Object { $n++; '{0,4}:
+  │ {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\config\config.go' | ForEach-Object { $n++; '{0,4}: {1}' -f $n,
+  │ $_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\dispatcher\internal\queue_listener.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\controlplane\internal\roundtripper.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+
+• Running $n=0; Get-Content -LiteralPath 'pkg\mcpclient\internal\context.go' | ForEach-Object { $n++; '{0,4}:
+  │ {1}' -f $n,$_ }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\mcpclient\headers.go' | ForEach-Object { $n++; '{0,4}: {1}' -f $n,
+  │ $_ }
+  └    1: package mcpclient
+       2:
+    … +36 lines (ctrl + t to view transcript)
+      39:     return nil
+      40: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\mcpclient\channel_transport_factory.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+  └    1: package mcpclient
+       2:
+    … +237 lines (ctrl + t to view transcript)
+     240:     }
+     241: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\mcpclient\internal\static_headers.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+  └    1: package internal
+       2:
+    … +112 lines (ctrl + t to view transcript)
+     115:     return out
+     116: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\controlplane\internal\poller.go' | ForEach-Object { $n++; '{0,4}:
+  │ {1}' -f $n,$_ }
+  └    1: package internal
+       2:
+    … +353 lines (ctrl + t to view transcript)
+     356:     p.metrics.commandAge.Record(ctx, age)
+     357: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\dispatcher\internal\processor.go' | ForEach-Object { $n++; '{0,4}:
+  │ {1}' -f $n,$_ }
+  └    1: package dispatcherinternal
+       2:
+    … +1137 lines (ctrl + t to view transcript)
+    1140:     return attrs
+    1141: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\mcpclient\transport_provider.go' | ForEach-Object { $n++; '{0,4}:
+    … +102 lines (ctrl + t to view transcript)
+     105:     return provider, nil
+     106: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\dispatcher\internal\queue_listener.go' | ForEach-Object { $n++;
+       2:
+    … +212 lines (ctrl + t to view transcript)
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\controlplane\internal\roundtripper.go' | ForEach-Object { $n++;
+  │ '{0,4}: {1}' -f $n,$_ }
+  └    1: package internal
+       2:
+    … +139 lines (ctrl + t to view transcript)
+     142:     }
+     143: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\mcpclient\internal\context.go' | ForEach-Object { $n++; '{0,4}: {1}'
+     132: }
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\controlplane\internal\tunnel_service_client.go' | ForEach-Object
+  │ { $n++; '{0,4}: {1}' -f $n,$_ }
+     634: // parsing and conversion helpers and command types were moved into
+     635: // command_parser.go and command_types.go to keep this file focused on HTTP logic.
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\config\config.go' | ForEach-Object { $n++; '{0,4}: {1}' -f $n,$_ }
+  └    1: package config
+    2351: }
+
+• Ran rg -n "func buildMcpHTTPTransport|StaticHeaders|ApplyRequestHeaders|ForwardingRoundTripper|RoundTripper"
+  │ pkg\mcpclient -g '*.go'
+  └ pkg\mcpclient\fxmodule_test.go:239:func
+    NewForwardingRoundTripper(roundTripperFunc(func(*http.Request) (*http.Response, error) {
+
+• Searching the web
+
+• Searched the web
+• Searched the web
+
+• Updated Plan
+  └ The exact upstream is confirmed at commit e288bde76d811e4fc5e2ca076775eab04459c682. The repository contains
+    the customer client, protocol and a development control plane, but not OpenAI's production tunnel service.
+    □ Compare it directly with the current BOS client and vendor relay boundaries
+    □ Give a reuse verdict, required adaptations, and unresolved risks
+  │ Authorization|APIKey|shard|retry|backoff|MaxInFlight|MaxConcurrent|HTTPRawUnsafe|allow-remote-ui|
+  │ health.listen|127\.0\.0\.1:8080|response_timeout|timeout_ms" pkg cmd client.go | Select-Object -First 500
+    … +497 lines (ctrl + t to view transcript)
+    pkg\localproxy\localproxy.go:1352:    if r.Header.Get("Authorization") == want {
+  │ $n -le 1200){ '{0,4}: {1}' -f $n,$_ } }
+  └  720:
+
+• Ran rg -n "allowRemote|SameOriginUnsafe|NewGuardedMux|/ui|/metrics|/healthz|/readyz|Authorization|
+  │ authenticate|auth" pkg\health pkg\adminui | Select-Object -First 250
+  └ pkg\health\health_test.go:23:    "github.com/openai/tunnel-client/pkg/oauth"
+    pkg\health\health_test.go:225:    req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+    … +250 lines (ctrl + t to view transcript)
+    pkg\adminui\oauth_test.go:141:        Error:     "oauth discovery: WWW-Authenticate probe GET got status
+    200",
+
+• Ran rg -n "type AdminMux|AdminMux|NewGuardedMux|SameOriginUnsafe|allowRemote" pkg -g '*.go' | Select-Object
+  │ -First 160
+  └ pkg\health\health.go:113:    AdminMux         *http.ServeMux `name:"admin_mux"`
+    pkg\health\health.go:122:    if p.AdminMux == nil {
+    … +36 lines (ctrl + t to view transcript)
+  │ Get-Content -LiteralPath $f | Select-Object -First 220 }
+  └ .github\workflows\release.yml
+    FILE .github\workflows\release.yml
+    … +218 lines (ctrl + t to view transcript)
+              az version
+
+
+• Searching the web
+
+• Searched the web for https://github.com/openai/tunnel-client/commit/e288bde76d811e4fc5e2ca076775eab04459c682
+
+• Searching the web
+
+• Searched the web
+
+• Searching the web
+
+• Searched the web for https://api.github.com/repos/openai/tunnel-client/actions/runs?per_page=1
+
+• Ran git clone --depth 1 --branch v0.0.10 https://github.com/openai/tunnel-client.git
+  │ C:\tmp\openai-tunnel-client-v0.0.10-review-20260722
+  └ fatal: could not create work tree dir 'C:\tmp\openai-tunnel-client-v0.0.10-review-20260722': Permission
+    denied
+
+• Running git clone --depth 1 --branch v0.0.10 https://github.com/openai/tunnel-client.git
+  │ C:\tmp\openai-tunnel-client-v0.0.10-review-20260722
+
+⚠ Automatic approval review approved (risk: low, authorization: medium): Cloning a public repository tag into a
+  new temp directory is a routine low-risk inspection step, and it is within the user-authorized review of that
+  exact upstream project.
+
+• Ran git clone --depth 1 --branch v0.0.10 https://github.com/openai/tunnel-client.git
+  │ C:\tmp\openai-tunnel-client-v0.0.10-review-20260722
+  └ Cloning into 'C:\tmp\openai-tunnel-client-v0.0.10-review-20260722'...
+    warning: refs/tags/v0.0.10 ab3b64ba1818d67ae625fb91c9b8ef850759579a is not a commit!
+
+• Running Get-Content -Raw -LiteralPath 'host\runtime\server\VENDOR-RELAY-CONNECTOR.md'
+
+• Running Get-Content -Raw -LiteralPath 'architecture-docs\15-vendor-remote-access-add-on.md'
+
+
+    … +142 lines (ctrl + t to view transcript)
+    and revocation remain admin operations.
+
+
+
+
+• Ran Get-Content -Raw -LiteralPath 'tools\bos-vendor-addon\README.md'
+  └ # Building OS Vendor Add-on
+
+    … +328 lines (ctrl + t to view transcript)
+    - proof that the selected external ChatGPT client sends the fixed bearer key.
+
+
+• Ran Get-Content -Raw -LiteralPath 'host\runtime\chatgpt_mcp\README.md'
+  └ # Building OS HTTP MCP access point
+
+    … +172 lines (ctrl + t to view transcript)
+    in that client; this service does not disable authentication as a fallback.
+
+
+• Ran rg -n "MCP_EXTRA_HEADERS|mcp.extra-headers|ExtraHeaders|parseHeader|Authorization.*mcp|static header"
+  │ pkg\config pkg\mcpclient docs\configuration.md | Select-Object -First 220
+  └ docs\configuration.md:170:For static header values, use `env:VARNAME` or `file:/path/to/secret` on the
+    docs\configuration.md:458:  - Flag (repeatable): `--mcp.extra-headers "Key: Value"`
+    … +115 lines (ctrl + t to view transcript)
+    … +43 lines (ctrl + t to view transcript)
+     491:   `authorization_servers[0]` (external IdP issuers are supported). Mismatch
+     492:   details are preserved in diagnostics and logs.
+
+• Ran $files=@('pkg\controlplane\internal\poller.go','pkg\controlplane\internal\tunnel_service_client.go','pkg\
+  │ dispatcher\internal\queue_listener.go','pkg\dispatcher\internal\processor.go','pkg\controlplane\internal\
+  │ retry_after.go'); foreach($f in $files){ "$f`t$((Get-Content -LiteralPath $f).Count)" }
+  └ pkg\controlplane\internal\poller.go    357
+    pkg\controlplane\internal\tunnel_service_client.go    635
+    pkg\dispatcher\internal\queue_listener.go    216
+    pkg\dispatcher\internal\processor.go    1141
+    pkg\controlplane\internal\retry_after.go    74
+
+• Ran rg -n "func \(|backoff|Retry-After|StatusUnauthorized|StatusForbidden|StatusTooManyRequests|
+  │ StatusNotFound|StatusRequestTimeout|StatusBadGateway|StatusServiceUnavailable|StatusGatewayTimeout|
+  │ … +3 lines
+  └ pkg\controlplane\internal\retry_after.go:13:// parseRetryAfter parses the standard Retry-After header into
+    a relative
+    … +127 lines (ctrl + t to view transcript)
+• The key split is now clear, Sir. The open-source repository is the strong customer-side client and a
+  published wire contract. OpenAI’s production tunnel server is not in it. Reuse is possible, but “drop it in
+  and self-host the whole tunnel” is not.
+
+• Waiting for agents
+
+• Finished waiting
+  └ No agents completed yet
+
+• Finished waiting
+  └ No agents completed yet
+
+• Running $doc=Get-Content -Raw -LiteralPath 'docs\openapi.json' | ConvertFrom-Json -Depth 100;
+  │ $doc.paths.PSObject.Properties | ForEach-Object { $path=$_.Name; $_.Value.PSObject.Properties |
+  │ Where-Object { $_.Name -in @('get','post','delete') } | ForEach-Object { "{0}`t{1}" -f
+  │ … +1 lines
+
+• Ran $doc=Get-Content -Raw -LiteralPath 'docs\openapi.json' | ConvertFrom-Json -Depth 100;
+  │ $doc.paths.PSObject.Properties | ForEach-Object { $path=$_.Name; $_.Value.PSObject.Properties |
+  │ Where-Object { $_.Name -in @('get','post','delete') } | ForEach-Object { "{0}`t{1}" -f
+  │ … +1 lines
+  └ GET    /v1/tunnels/{tunnel_id}
+    GET    /v1/tunnels/{tunnel_id}/poll
+    POST    /v1/tunnels/{tunnel_id}/response
+
+• Ran git rev-parse HEAD; git describe --tags --exact-match; git status --short --branch; (rg --files |
+  │ Measure-Object).Count; if(Test-Path 'pkg\cloudflared'){ 'cloudflared_source_present' } else
+  │ { 'cloudflared_source_absent' }
+  └ 105e17a79a36e4e5c897fd698ed2b8dbf935b144
+    v0.0.10
+    … +3 lines (ctrl + t to view transcript)
+    warning: unable to access 'C:\Users\danie/.config/git/ignore': Permission denied
+    warning: unable to access 'C:\Users\danie/.config/git/ignore': Permission denied
+
+• Interacted with `/root/openai_tunnel_source`
+
+• Interacted with `/root/bos_tunnel_comparison`
+
+• Ran $n=0; Get-Content -LiteralPath 'pkg\adminui\fxmodule.go' | ForEach-Object { $n++; if($n -ge 90 -and $n
+  │ -le 175){ '{0,4}: {1}' -f $n,$_ } }
+  └   90:
+      91: func registerRoutes(p routeParams) error {
+    … +82 lines (ctrl + t to view transcript)
+     174: func newConfiguredLogBuffer(cfg *config.AdminUIConfig) *LogBuffer {
+     175:     capacity := defaultLogCapacity
+
+
+› ok, so this is like the gateway side right? whcih mens it would come with alot of cues on how to reconstruct
+  the vendor side? am i right in saying that?
+
+
+• Partly, Sir. It is the gateway-side client, and it gives us a precise vendor-side contract: poll, response,
+  correlation, deadlines, retries, streaming, session close, headers and error shapes.
+
+  It also includes a local in-memory server that demonstrates the other half. But that server is test-only.
+  Production auth, public ingress, durable queues, tenant isolation, rate limits, audit and HA still have to
+  come from our vendor service.
+
+• Waiting for agents
+
+• Finished waiting
+  └ No agents completed yet
+
+• Waiting for agents
+
+• Finished waiting
+  └ No agents completed yet
+
+• Context compacted
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I have finished the source comparison, Sir. The key correction is confirmed: it exposes enough to reconstruct
+  the vendor protocol, but not enough to copy OpenAI’s production vendor service.
+
+• Updated Plan
+  └ Source, protocol, licence, security, and BOS boundary review completed. No repository changes were made.
+    ✔ Identify the exact OpenAI tunnel feature and source revision
+    ✔ Inspect the licence, protocol, runtime, tests, and security boundaries
+    ✔ Compare the reusable parts against the current BOS vendor tunnel
+    ✔ Deliver the reuse verdict and implementation boundary
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Partly, Sir.
+
+  This is the gateway-side client, plus enough protocol and test-server code to reconstruct a compatible vendor
+  side. It is not OpenAI’s production vendor service.
+
+  ## Review outcome
+
+  Reuse the client and protocol. Do not deploy the included server.
+
+  The repository gives us:
+
+  - GET /v1/tunnels/{id}/poll
+  - POST /v1/tunnels/{id}/response
+  - Request correlation, deadlines and retries
+  - MCP streaming and session termination
+  - Backpressure, health, metrics and diagnostics
+  - A complete in-memory server showing the other end of the conversation
+
+  That local server is explicitly a single-process development control plane. It has no production tenancy,
+  persistence, HA, public caller authentication or fleet management. Source
+  (https://github.com/openai/tunnel-client/blob/e288bde76d811e4fc5e2ca076775eab04459c682/pkg/localproxy/localproxy.go#L1023-L1173)
+
+  ## BOS fit
+
+  We can replace the current BOS WebSocket transport with a pinned fork of this client and protocol.
+
+  Keep from BOS:
+
+  - Enrollment and RouterOS identity
+  - DPAPI credential storage
+  - Five-digit site IDs, mapped to separate opaque tunnel IDs
+  - Public site access keys and revocation
+  - FastMCP on port 7087
+  - Catalogue HMAC health proof
+  - Vendor TUI, audit, rate limits and body limits
+
+  Build on the vendor side:
+
+  - Production /poll and /response service
+  - Authenticated public MCP ingress
+  - Durable request queues
+  - Tenant and site isolation
+  - HA and failover
+  - Fleet administration
+
+  That replaces the transport described in /C:/Users/danie/building-os/host/runtime/server/VENDOR-RELAY-
+  CONNECTOR.md:9, not the entire BOS vendor architecture.
+
+  ## Security findings
+
+  A straight drop-in is unsafe:
+
+  - Remote forwarded headers override configured static headers. A caller’s Authorization could replace the
+    private BOS bearer used by port 7087. We must strip remote authentication headers and inject the local key
+    afterwards. Source
+
+    (https://github.com/openai/tunnel-client/blob/e288bde76d811e4fc5e2ca076775eab04459c682/pkg/mcpclient/fxmodule.go#L280-L320)
+
+  - Successful poll bodies are read without a size limit.
+  - HTTPS is not strictly enforced by configuration validation.
+  - Readiness does not prove a successful vendor poll.
+  - Remote admin UI mode has no authentication. Keep it loopback-only.
+  - Delivery is effectively at-most-once after polling. A crash after a local write but before response
+    delivery can lose the result, so BOS write confirmation and idempotency remain necessary.
+
+  ## Licence and validation
+
+  Apache 2.0 permits commercial modification and redistribution, provided BOS retains the licence, NOTICE and
+  modification notices. Licence (https://github.com/openai/tunnel-client/blob/master/LICENSE)
+
+  Reviewed upstream commit e288bde76d811e4fc5e2ca076775eab04459c682, version 0.0.11-dev. Go is not installed
+  locally, so I could not run its test suite. No BOS files were changed.
+
+  The accurate description is: it gives us a strong vendor-side blueprint and test double, not a finished
+  vendor-side product.

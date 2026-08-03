@@ -1,44 +1,101 @@
+import json
+import shutil
 import pytest
-import requests
 import time
 import asyncio
 from unittest.mock import patch, MagicMock
-from mcpo.main import MCP_VERSION
+from fastapi.testclient import TestClient
+from mcpo.main import MCP_VERSION, build_main_app
+from mcpo.utils.main import SUPPORTED_MCP_VERSIONS
+import mcpo.services.state as state_mod
 
 
 class TestProtocolVersionHeader:
     """Test that MCPO properly includes MCP protocol version headers when communicating with MCP servers."""
 
     @pytest.fixture
-    def live_server_client(self):
-        """Use the live running server instead of creating a new app instance."""
-        import requests
-        # Test if server is running
-        try:
-            response = requests.get("http://localhost:8000/_meta/servers", timeout=5)
-            if response.status_code == 200:
-                # Return a client that uses the live server
-                class LiveClient:
-                    def __init__(self):
-                        self.base_url = "http://localhost:8000"
-                        # Add API key authentication header
-                        self.headers = {"Authorization": "Bearer top-secret"}
-                    
-                    def get(self, path):
-                        return requests.get(f"{self.base_url}{path}", headers=self.headers)
-                    
-                    def post(self, path, json=None, headers=None):
-                        # Merge API key headers with any additional headers
-                        request_headers = self.headers.copy()
-                        if headers:
-                            request_headers.update(headers)
-                        return requests.post(f"{self.base_url}{path}", json=json, headers=request_headers)
-                
-                return LiveClient()
-            else:
-                pytest.skip("Live server not running on localhost:8000")
-        except Exception:
-            pytest.skip("Cannot connect to live server on localhost:8000")
+    def live_server_client(self, tmp_path, monkeypatch):
+        """Spin up a self-contained MCPO instance for this test: its own throwaway
+        config, its own throwaway state file, and a real 'time' MCP server (via
+        uvx). Hermetic by construction -- does not talk to any developer's locally
+        running mcpo server (no port, no socket at all: in-process ASGI via
+        TestClient) and does not read/write the real mcpo_state.json, so results
+        can't depend on whether a developer has the time server enabled/disabled
+        on their own instance.
+        """
+        if shutil.which("uvx") is None:
+            pytest.skip("uvx not available; cannot start a real MCP time server for this test")
+
+        # Isolate the process-wide StateManager singleton (server enabled/disabled
+        # flags are read from mcpo_state.json via this singleton, not from
+        # mcpo.json) so this test never reads/writes the real mcpo_state.json.
+        # monkeypatch restores the original singleton on teardown.
+        monkeypatch.setattr(
+            state_mod,
+            "_global_state_manager",
+            state_mod.StateManager(state_file_path=str(tmp_path / "test_state.json")),
+        )
+
+        cfg = {
+            "mcpServers": {
+                "time": {
+                    "enabled": True,
+                    "command": "uvx",
+                    # This vendor release imports the pre-2.0 McpError name.
+                    # Pin both the package and its compatible SDK range.
+                    "args": [
+                        "--from",
+                        "mcp-server-time==2026.7.10",
+                        "--with",
+                        "mcp==1.29.0",
+                        "mcp-server-time",
+                    ],
+                }
+            }
+        }
+        cfg_path = tmp_path / "mcpo.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        app = asyncio.run(build_main_app(config_path=str(cfg_path)))
+
+        class SelfContainedClient:
+            """Adapter matching the old LiveClient interface, backed by an
+            in-process TestClient (real ASGI request/response handling -- the
+            same header/middleware code path as a real socket, just without
+            the socket)."""
+
+            def __init__(self, test_client: TestClient):
+                self._tc = test_client
+                self.headers = {}
+
+            def get(self, path):
+                return self._tc.get(path, headers=self.headers)
+
+            def post(self, path, json=None, headers=None):
+                request_headers = dict(self.headers)
+                if headers:
+                    request_headers.update(headers)
+                return self._tc.post(path, json=json, headers=request_headers)
+
+        # TestClient's context manager runs the ASGI lifespan synchronously,
+        # so by the time the block is entered the 'time' sub-app is already
+        # connected (readiness wait); __exit__ runs lifespan shutdown, which
+        # tears down the stdio MCP server subprocess.
+        with TestClient(app) as test_client:
+            response = test_client.get("/_meta/servers")
+            assert response.status_code == 200
+            time_server = next(
+                (
+                    item
+                    for item in response.json()["servers"]
+                    if item["name"] == "time"
+                ),
+                None,
+            )
+            assert time_server is not None
+            assert time_server["enabled"] is True, time_server
+            assert time_server["connected"] is True, time_server
+            yield SelfContainedClient(test_client)
 
     def test_http_client_without_protocol_header_still_works(self, live_server_client):
         """Test that HTTP clients without MCP-Protocol-Version header still work."""
@@ -167,5 +224,5 @@ class TestProtocolVersionHeader:
             # Verify the warning message content
             warning_msg = protocol_warnings[-1]["message"]  # Get most recent
             assert "Unsupported or missing MCP-Protocol-Version" in warning_msg
-            assert "supported=['2025-06-18']" in warning_msg
+            assert f"supported={SUPPORTED_MCP_VERSIONS}" in warning_msg
             assert "received=None" in warning_msg

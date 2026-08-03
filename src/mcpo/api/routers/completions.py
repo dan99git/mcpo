@@ -1,17 +1,32 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import time
 import uuid
 from typing import Any, AsyncIterator, Dict, List, Optional, Union
+from urllib.parse import urlsplit
 
 import httpx
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
+from mcpo.services import model_catalog, provider_registry
+from mcpo.services.codex_oauth import (
+    CODEX_BACKEND_URL,
+    CODEX_ORIGINATOR,
+    CODEX_USER_AGENT,
+    CodexOAuthCredentials,
+    CodexOAuthError,
+    CodexStreamState,
+    build_codex_request,
+    codex_event_to_chat_chunks,
+    codex_response_to_chat,
+)
+from mcpo.services.model_api_keys import CODEX_OAUTH_PROVIDER_ID
 from mcpo.services.skills import compile_skills_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -24,6 +39,7 @@ class ChatMessage(BaseModel):
     content: Any
     name: Optional[str] = None
     tool_call_id: Optional[str] = Field(None, alias="tool_call_id")
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 
 class ToolFunction(BaseModel):
@@ -228,34 +244,9 @@ async def _fetch_minimax_models() -> List[Dict[str, str]]:
     return models
 
 
-async def _list_models() -> List[Dict[str, str]]:
-    """Aggregate models from all configured providers."""
-    import asyncio
-    
-    # Fetch from all providers in parallel
-    # Note: Perplexity excluded - their API key is for MCP server only, not completions
-    results = await asyncio.gather(
-        _fetch_openrouter_models(),
-        _fetch_openai_models(),
-        _fetch_google_models(),
-        _fetch_anthropic_models(),
-        _fetch_minimax_models(),
-        return_exceptions=True,
-    )
-    
-    all_models: List[Dict[str, str]] = []
-    seen: set = set()
-    
-    for result in results:
-        if isinstance(result, Exception):
-            continue
-        for model in result:
-            model_id = model.get("id")
-            if model_id and model_id not in seen:
-                all_models.append(model)
-                seen.add(model_id)
-    
-    return all_models
+async def _list_models() -> List[Dict[str, Any]]:
+    """Return the shared provider-qualified model catalog."""
+    return await model_catalog.list_all_models()
 
 
 def _json(obj: Any) -> str:
@@ -335,9 +326,19 @@ class OpenAICompatibleProvider(BaseCompletionProvider):
         return headers
 
     def _build_payload(self, payload: CompletionRequest, *, stream: bool, extra_body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        messages: List[Dict[str, Any]] = []
+        for message in payload.messages:
+            mapped_message = message.model_dump(
+                mode="json",
+                by_alias=True,
+                exclude_none=True,
+            )
+            if message.content is None:
+                mapped_message["content"] = None
+            messages.append(mapped_message)
         body: Dict[str, Any] = {
             "model": payload.model,
-            "messages": json.loads(payload.model_dump_json(include={"messages"})),
+            "messages": messages,
             "stream": stream,
         }
         if payload.temperature is not None:
@@ -349,7 +350,10 @@ class OpenAICompatibleProvider(BaseCompletionProvider):
         if payload.stop:
             body["stop"] = payload.stop
         if payload.tools:
-            body["tools"] = json.loads(payload.model_dump_json(include={"tools"}))
+            body["tools"] = [
+                tool.model_dump(mode="json", by_alias=True, exclude_none=True)
+                for tool in payload.tools
+            ]
         if payload.tool_choice is not None:
             body["tool_choice"] = payload.tool_choice
         if payload.metadata:
@@ -422,6 +426,142 @@ class OpenAICompatibleProvider(BaseCompletionProvider):
                 logger.info(f"[COMPLETIONS] {self.name} stream complete: {chunk_count} chunks")
 
 
+class CodexOAuthProvider(BaseCompletionProvider):
+    def __init__(self, *, base_url: Optional[str] = None) -> None:
+        self.name = CODEX_OAUTH_PROVIDER_ID
+        self.base_url = (base_url or CODEX_BACKEND_URL).rstrip("/")
+        self.credentials = CodexOAuthCredentials()
+
+    @staticmethod
+    def _headers(credentials: Dict[str, str]) -> Dict[str, str]:
+        return {
+            "Accept": "text/event-stream",
+            "Authorization": f"Bearer {credentials['access_token']}",
+            "Chatgpt-Account-Id": credentials["account_id"],
+            "Content-Type": "application/json",
+            "Originator": CODEX_ORIGINATOR,
+            "User-Agent": CODEX_USER_AGENT,
+        }
+
+    @staticmethod
+    def _upstream_error(status_code: int, body: bytes) -> CompletionProviderError:
+        detail = ""
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                error = payload.get("error")
+                if isinstance(error, dict):
+                    detail = str(error.get("message") or error.get("code") or "")
+                elif error:
+                    detail = str(error)
+        except (TypeError, ValueError):
+            pass
+        message = f"Codex OAuth upstream returned HTTP {status_code}"
+        if detail:
+            message += f": {detail[:500]}"
+        return CompletionProviderError(message)
+
+    async def _events(
+        self,
+        body: Dict[str, Any],
+    ) -> AsyncIterator[Dict[str, Any]]:
+        try:
+            credentials = await self.credentials.get()
+            url = f"{self.base_url}/responses"
+            for attempt in range(2):
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(
+                        "POST",
+                        url,
+                        headers=self._headers(credentials),
+                        json=body,
+                    ) as response:
+                        if (
+                            response.status_code == status.HTTP_401_UNAUTHORIZED
+                            and attempt == 0
+                        ):
+                            await response.aread()
+                            credentials = await self.credentials.get(
+                                force_refresh=True
+                            )
+                            continue
+                        if response.status_code >= 400:
+                            error_body = await response.aread()
+                            raise self._upstream_error(
+                                response.status_code, error_body
+                            )
+                        async for line in response.aiter_lines():
+                            if not line.startswith("data:"):
+                                continue
+                            raw = line[5:].strip()
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except ValueError as exc:
+                                raise CompletionProviderError(
+                                    "Codex OAuth upstream returned invalid SSE JSON."
+                                ) from exc
+                            if isinstance(event, dict):
+                                yield event
+                        return
+        except httpx.HTTPError as exc:
+            raise CompletionProviderError(
+                f"Codex OAuth request failed: {type(exc).__name__}."
+            ) from exc
+
+    async def complete(self, payload: CompletionRequest) -> Dict[str, Any]:
+        body, reverse_names = build_codex_request(payload)
+        terminal: Optional[Dict[str, Any]] = None
+        output_items: Dict[int, Dict[str, Any]] = {}
+        try:
+            async for event in self._events(body):
+                if event.get("type") == "response.output_item.done":
+                    item = event.get("item")
+                    output_index = event.get("output_index")
+                    if isinstance(item, dict) and isinstance(output_index, int):
+                        output_items[output_index] = item
+                if event.get("type") in {
+                    "response.completed",
+                    "response.incomplete",
+                }:
+                    terminal = dict(event)
+                    response = terminal.get("response")
+                    if isinstance(response, dict) and output_items:
+                        patched_response = dict(response)
+                        patched_response["output"] = [
+                            output_items[index] for index in sorted(output_items)
+                        ]
+                        terminal["response"] = patched_response
+        except CodexOAuthError as exc:
+            raise CompletionProviderError(str(exc)) from exc
+        if terminal is None:
+            raise CompletionProviderError(
+                "Codex OAuth stream ended before a terminal response."
+            )
+        try:
+            return codex_response_to_chat(
+                terminal,
+                requested_model=payload.model,
+                reverse_names=reverse_names,
+            )
+        except CodexOAuthError as exc:
+            raise CompletionProviderError(str(exc)) from exc
+
+    async def stream(self, payload: CompletionRequest) -> AsyncIterator[str]:
+        body, reverse_names = build_codex_request(payload)
+        state = CodexStreamState(
+            requested_model=payload.model,
+            reverse_names=reverse_names,
+        )
+        try:
+            async for event in self._events(body):
+                for chunk in codex_event_to_chat_chunks(event, state):
+                    yield _json(chunk)
+        except CodexOAuthError as exc:
+            raise CompletionProviderError(str(exc)) from exc
+
+
 class AnthropicProvider(BaseCompletionProvider):
     def __init__(self, *, base_url: Optional[str], api_key: Optional[str]) -> None:
         self.name = "anthropic"
@@ -480,13 +620,60 @@ class AnthropicProvider(BaseCompletionProvider):
             if role == "system":
                 system_msgs.append(_as_text(msg.content))
                 continue
+            if role == "tool":
+                if not msg.tool_call_id:
+                    raise CompletionProviderError(
+                        "Anthropic tool result messages require tool_call_id"
+                    )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": msg.tool_call_id,
+                                "content": _as_text(msg.content),
+                            }
+                        ],
+                    }
+                )
+                continue
+
             mapped_role = "assistant" if role == "assistant" else "user"
-            messages.append(
-                {
-                    "role": mapped_role,
-                    "content": [{"type": "text", "text": _as_text(msg.content)}],
-                }
-            )
+            content_blocks: List[Dict[str, Any]] = []
+            if msg.content not in (None, ""):
+                content_blocks.append({"type": "text", "text": _as_text(msg.content)})
+            if role == "assistant":
+                for tool_call in msg.tool_calls or []:
+                    function = tool_call.get("function") or {}
+                    name = function.get("name")
+                    if not name:
+                        raise CompletionProviderError(
+                            "Anthropic tool call messages require a function name"
+                        )
+                    arguments = function.get("arguments", {})
+                    if isinstance(arguments, str):
+                        try:
+                            arguments = json.loads(arguments)
+                        except json.JSONDecodeError as exc:
+                            raise CompletionProviderError(
+                                f"Invalid JSON arguments for tool call '{name}'"
+                            ) from exc
+                    if not isinstance(arguments, dict):
+                        raise CompletionProviderError(
+                            f"Tool call arguments for '{name}' must be a JSON object"
+                        )
+                    content_blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": tool_call.get("id") or uuid.uuid4().hex,
+                            "name": name,
+                            "input": arguments,
+                        }
+                    )
+            if not content_blocks:
+                content_blocks.append({"type": "text", "text": ""})
+            messages.append({"role": mapped_role, "content": content_blocks})
         return {"system": "\n\n".join(system_msgs) or None, "messages": messages}
 
     def _as_openai_response(self, payload: CompletionRequest, response: Dict[str, Any]) -> Dict[str, Any]:
@@ -894,7 +1081,8 @@ class MiniMaxProvider(BaseCompletionProvider):
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        return await delegate.stream(payload)
+        async for chunk in delegate.stream(payload):
+            yield chunk
 
 
 def _infer_provider(model: str) -> str:
@@ -914,26 +1102,244 @@ def _infer_provider(model: str) -> str:
     return "openai"
 
 
-def _resolve_provider(payload: CompletionRequest) -> BaseCompletionProvider:
-    inferred = _infer_provider(payload.model)
-    provider = (payload.provider or inferred).lower()
-    logger.info(f"[COMPLETIONS] _resolve_provider: model={payload.model}, inferred={inferred}, final_provider={provider}")
+def _first_environment_value(*names: str) -> Optional[str]:
+    for name in names:
+        value = os.getenv(name)
+        if value:
+            return value
+    return None
 
-    if provider in {"openai", "openrouter", "azure"}:
-        api_key = payload.api_key or os.getenv("OPEN_AI_API_KEY")
+
+def _validated_provider_base_url(value: str) -> str:
+    try:
+        return provider_registry.validate_provider_base_url(value)
+    except provider_registry.ProviderRegistryError as exc:
+        raise CompletionProviderError(str(exc)) from exc
+
+
+def _is_loopback_base_url(value: str) -> bool:
+    hostname = urlsplit(value).hostname
+    if not hostname:
+        return False
+    if hostname.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(hostname).is_loopback
+    except ValueError:
+        return False
+
+
+def _resolve_connection(
+    payload: CompletionRequest,
+    *,
+    provider_name: str,
+    default_base_url: str,
+    api_key_environment: tuple[str, ...],
+    base_url_environment: tuple[str, ...] = (),
+    supports_keyless_loopback: bool = False,
+) -> tuple[str, Optional[str]]:
+    if payload.base_url is not None:
+        base_url = _validated_provider_base_url(payload.base_url)
+        if payload.api_key:
+            return base_url, payload.api_key
+        if supports_keyless_loopback and _is_loopback_base_url(base_url):
+            return base_url, None
+        raise CompletionProviderError(
+            f"Custom base_url for {provider_name} requires a request-supplied api_key"
+        )
+
+    configured_base_url = (
+        _first_environment_value(*base_url_environment) or default_base_url
+    )
+    base_url = _validated_provider_base_url(configured_base_url)
+    api_key = payload.api_key or _first_environment_value(*api_key_environment)
+    if api_key:
+        return base_url, api_key
+    if supports_keyless_loopback and _is_loopback_base_url(base_url):
+        return base_url, None
+    raise CompletionProviderError(f"{provider_name} API key is required")
+
+
+def _registered_provider(
+    registry: provider_registry.ProviderRegistry,
+    provider_id: str,
+) -> Optional[Dict[str, Any]]:
+    try:
+        return registry.resolved_provider(provider_id)
+    except provider_registry.ProviderRegistryError:
+        return None
+
+
+def _registered_model_target(
+    payload: CompletionRequest,
+    registry: provider_registry.ProviderRegistry,
+) -> Optional[tuple[Dict[str, Any], str]]:
+    qualified_provider: Optional[Dict[str, Any]] = None
+    qualified_provider_id = ""
+    qualified_model_id = payload.model
+    if ":" in payload.model:
+        candidate_provider_id, candidate_model_id = payload.model.split(":", 1)
+        candidate = _registered_provider(registry, candidate_provider_id.lower())
+        if candidate is not None and candidate_model_id:
+            qualified_provider = candidate
+            qualified_provider_id = str(candidate["id"])
+            qualified_model_id = candidate_model_id
+
+    if payload.provider:
+        explicit_provider_id = payload.provider.strip().lower()
+        if qualified_provider is not None and qualified_provider_id != explicit_provider_id:
+            raise CompletionProviderError(
+                f"Model '{payload.model}' selects provider '{qualified_provider_id}' "
+                f"but the request selects provider '{explicit_provider_id}'"
+            )
+        selected = _registered_provider(registry, explicit_provider_id)
+        if selected is None:
+            return None
+        # Preserve the existing native provider path unless this is a saved
+        # registry entry or the model explicitly uses a registry-qualified ID.
+        if not selected.get("isSaved") and qualified_provider is None:
+            return None
+        model_id = qualified_model_id if qualified_provider is not None else payload.model
+        return selected, model_id
+
+    if qualified_provider is not None:
+        return qualified_provider, qualified_model_id
+
+    matches: List[Dict[str, Any]] = []
+    for provider in registry.resolved_providers():
+        if any(
+            str(model.get("id") or "") == payload.model
+            for model in provider.get("models", [])
+        ):
+            matches.append(provider)
+
+    if len(matches) > 1:
+        qualified_ids = ", ".join(
+            f"{provider['id']}:{payload.model}" for provider in matches
+        )
+        raise CompletionProviderError(
+            f"Model '{payload.model}' is ambiguous; use a provider-qualified ID: "
+            f"{qualified_ids}"
+        )
+    if matches:
+        return matches[0], payload.model
+    return None
+
+
+def _registered_provider_connection(
+    payload: CompletionRequest,
+    provider: Dict[str, Any],
+) -> tuple[str, Optional[str]]:
+    provider_id = str(provider["id"])
+    kind = str(provider["kind"])
+    openai_compatible = kind in {"openai", "openrouter", "openai_compatible", "kimi"}
+
+    if payload.base_url is not None:
+        return _resolve_connection(
+            payload,
+            provider_name=provider_id,
+            default_base_url=str(provider["baseUrl"]),
+            api_key_environment=(),
+            supports_keyless_loopback=openai_compatible,
+        )
+
+    base_url = str(provider["baseUrl"])
+    if provider.get("baseUrlSource") == "preset" and kind == "openai":
+        base_url = "https://api.openai.com/v1"
+    base_url = _validated_provider_base_url(base_url)
+    api_key = payload.api_key or provider.get("apiKey")
+    if api_key:
+        return base_url, str(api_key)
+    if openai_compatible and provider.get("supportsKeyless") and _is_loopback_base_url(base_url):
+        return base_url, None
+    raise CompletionProviderError(
+        f"Provider '{provider_id}' needs an API key or an enabled keyless local configuration"
+    )
+
+
+def _provider_from_registry(
+    payload: CompletionRequest,
+    provider: Dict[str, Any],
+) -> BaseCompletionProvider:
+    provider_id = str(provider["id"])
+    if not provider.get("enabled", True):
+        raise CompletionProviderError(f"Provider '{provider_id}' is disabled")
+
+    kind = str(provider["kind"])
+    if kind == "codex_oauth":
+        return CodexOAuthProvider(base_url=str(provider["baseUrl"]))
+    base_url, api_key = _registered_provider_connection(payload, provider)
+    if kind in {"openai", "openrouter", "openai_compatible", "kimi"}:
         extra_headers: Dict[str, str] = {}
-        if provider == "openrouter":
-            api_key = payload.api_key or os.getenv("OPENROUTER_API_KEY")
+        if kind == "openrouter":
             site = os.getenv("OPENROUTER_SITE_URL")
             app = os.getenv("OPENROUTER_APP_NAME")
             if site:
                 extra_headers["HTTP-Referer"] = site
             if app:
                 extra_headers["X-Title"] = app
-        if not api_key and provider != "azure":
-            logger.error(f"[COMPLETIONS] {provider} API key missing")
-            raise CompletionProviderError(f"{provider} API key is required")
-        base_url = payload.base_url or os.getenv("OPENAI_BASE_URL")
+        return OpenAICompatibleProvider(
+            provider_id,
+            base_url=base_url,
+            api_key=api_key,
+            extra_headers=extra_headers,
+        )
+    if kind in {"anthropic", "glm"}:
+        selected: BaseCompletionProvider = AnthropicProvider(
+            base_url=base_url,
+            api_key=api_key,
+        )
+    elif kind == "gemini":
+        selected = GeminiProvider(base_url=base_url, api_key=api_key)
+    elif kind == "minimax":
+        selected = MiniMaxProvider(base_url=base_url, api_key=api_key)
+    else:
+        raise CompletionProviderError(
+            f"Provider '{provider_id}' uses unsupported kind '{kind}'"
+        )
+    selected.name = provider_id
+    return selected
+
+
+def _resolve_provider(
+    payload: CompletionRequest,
+    registry: Optional[provider_registry.ProviderRegistry] = None,
+) -> BaseCompletionProvider:
+    if registry is not None:
+        target = _registered_model_target(payload, registry)
+        if target is not None:
+            registered, model_id = target
+            selected = _provider_from_registry(payload, registered)
+            payload.model = model_id
+            return selected
+
+    inferred = _infer_provider(payload.model)
+    provider = (payload.provider or inferred).lower()
+    logger.info(f"[COMPLETIONS] _resolve_provider: model={payload.model}, inferred={inferred}, final_provider={provider}")
+
+    if provider in {"openai", "openrouter", "azure"}:
+        default_base_url = "https://api.openai.com/v1"
+        api_key_environment = ("OPEN_AI_API_KEY", "OPENAI_API_KEY")
+        base_url_environment = ("OPEN_AI_BASE_URL", "OPENAI_BASE_URL")
+        extra_headers: Dict[str, str] = {}
+        if provider == "openrouter":
+            default_base_url = "https://openrouter.ai/api/v1"
+            api_key_environment = ("OPENROUTER_API_KEY",)
+            base_url_environment = ("OPENROUTER_BASE_URL",)
+            site = os.getenv("OPENROUTER_SITE_URL")
+            app = os.getenv("OPENROUTER_APP_NAME")
+            if site:
+                extra_headers["HTTP-Referer"] = site
+            if app:
+                extra_headers["X-Title"] = app
+        base_url, api_key = _resolve_connection(
+            payload,
+            provider_name=provider,
+            default_base_url=default_base_url,
+            api_key_environment=api_key_environment,
+            base_url_environment=base_url_environment,
+            supports_keyless_loopback=True,
+        )
         logger.info(f"[COMPLETIONS] Creating OpenAICompatibleProvider: name={provider}, base_url={base_url}")
         return OpenAICompatibleProvider(
             provider,
@@ -942,20 +1348,46 @@ def _resolve_provider(payload: CompletionRequest) -> BaseCompletionProvider:
             extra_headers=extra_headers,
         )
 
+    if provider == CODEX_OAUTH_PROVIDER_ID:
+        return CodexOAuthProvider()
+
     if provider in {"anthropic", "claude"}:
         logger.info(f"[COMPLETIONS] Creating AnthropicProvider")
-        return AnthropicProvider(base_url=payload.base_url, api_key=payload.api_key)
+        base_url, api_key = _resolve_connection(
+            payload,
+            provider_name="anthropic",
+            default_base_url="https://api.anthropic.com",
+            api_key_environment=("ANTHROPIC_API_KEY",),
+            base_url_environment=("ANTHROPIC_BASE_URL",),
+        )
+        return AnthropicProvider(base_url=base_url, api_key=api_key)
 
     if provider in {"google", "gemini"}:
         logger.info(f"[COMPLETIONS] Creating GeminiProvider")
-        return GeminiProvider(base_url=payload.base_url, api_key=payload.api_key)
+        base_url, api_key = _resolve_connection(
+            payload,
+            provider_name="gemini",
+            default_base_url="https://generativelanguage.googleapis.com",
+            api_key_environment=("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+            base_url_environment=("GEMINI_BASE_URL", "GOOGLE_BASE_URL"),
+        )
+        return GeminiProvider(base_url=base_url, api_key=api_key)
 
     if provider == "minimax":
         logger.info(f"[COMPLETIONS] Creating MiniMaxProvider")
-        return MiniMaxProvider(
-            base_url=payload.base_url,
-            api_key=payload.api_key,
+        base_url, api_key = _resolve_connection(
+            payload,
+            provider_name="minimax",
+            default_base_url="https://api.minimax.io/anthropic",
+            api_key_environment=("MINIMAX_API_KEY",),
+            base_url_environment=("MINIMAX_BASE_URL",),
         )
+        return MiniMaxProvider(
+            base_url=base_url,
+            api_key=api_key,
+        )
+
+    raise CompletionProviderError(f"Unsupported provider '{provider}'")
 
 
 
@@ -969,12 +1401,64 @@ async def _sse(stream: AsyncIterator[str]) -> AsyncIterator[str]:
         yield _ensure_data_prefix("[DONE]")
 
 
+def _model_key_provider(request: Request) -> Optional[str]:
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, dict) or principal.get("kind") != "model_api_key":
+        return None
+    provider_id = str(principal.get("providerId") or "").strip().lower()
+    return provider_id or None
+
+
+def _bind_model_key_request(payload: CompletionRequest, request: Request) -> None:
+    provider_id = _model_key_provider(request)
+    if provider_id is None:
+        return
+    if provider_id != CODEX_OAUTH_PROVIDER_ID:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Model API key provider is not supported.",
+        )
+    if payload.base_url is not None or payload.api_key is not None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Model API keys cannot override provider connection settings.",
+        )
+    if payload.provider and payload.provider.strip().lower() != provider_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Model API key is restricted to provider '{provider_id}'.",
+        )
+    if ":" in payload.model:
+        qualified_provider, _ = payload.model.split(":", 1)
+        if qualified_provider.strip().lower() != provider_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Model API key is restricted to provider '{provider_id}'.",
+            )
+    payload.provider = provider_id
+
+
+def _filter_models_for_request(
+    models: List[Dict[str, Any]],
+    request: Request,
+) -> List[Dict[str, Any]]:
+    provider_id = _model_key_provider(request)
+    if provider_id is None:
+        return models
+    return [
+        model
+        for model in models
+        if str(model.get("provider") or "").strip().lower() == provider_id
+    ]
+
+
 @router.post(
     "/chat/completions",
     response_model=CompletionResponse,
     responses={206: {"description": "Streaming response"}},
 )
-async def chat_completions(payload: CompletionRequest):
+async def chat_completions(payload: CompletionRequest, request: Request):
+    _bind_model_key_request(payload, request)
     logger.info(f"[COMPLETIONS] Incoming request: model={payload.model}, provider_hint={payload.provider}, stream={payload.stream}")
     logger.info(f"[COMPLETIONS] Messages count={len(payload.messages)}, tools={len(payload.tools) if payload.tools else 0}")
     if payload.messages:
@@ -987,7 +1471,7 @@ async def chat_completions(payload: CompletionRequest):
         scope="completions",
         model=payload.model,
         provider=payload.provider,
-        requested_skill_ids=payload.skill_ids if payload.skill_ids else None,
+        requested_skill_ids=payload.skill_ids,
     )
     if skills_prompt:
         # Prepend or merge into existing system message
@@ -1000,7 +1484,10 @@ async def chat_completions(payload: CompletionRequest):
         logger.info(f"[COMPLETIONS] Injected skills system prompt ({len(skills_prompt)} chars)")
 
     try:
-        provider = _resolve_provider(payload)
+        provider = _resolve_provider(
+            payload,
+            registry=provider_registry.get_provider_registry(),
+        )
         logger.info(f"[COMPLETIONS] Resolved provider: {provider.name}")
     except CompletionProviderError as exc:
         logger.error(f"[COMPLETIONS] Provider resolution failed: {exc}")
@@ -1030,11 +1517,13 @@ async def chat_completions(payload: CompletionRequest):
     response_model=CompletionResponse,
     responses={206: {"description": "Streaming response"}},
 )
-async def legacy_completions(payload: CompletionRequest):
-    return await chat_completions(payload)
+async def legacy_completions(payload: CompletionRequest, request: Request):
+    return await chat_completions(payload, request)
 
 
-def _filter_by_favorites(models: List[Dict[str, str]]) -> List[Dict[str, str]]:
+def _filter_by_favorites(
+    models: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """Filter models list to only include starred/favorite models.
     
     If no favorites are set, returns all models (no filtering).
@@ -1047,12 +1536,24 @@ def _filter_by_favorites(models: List[Dict[str, str]]) -> List[Dict[str, str]]:
         # No favorites set - return all models
         return models
     
-    favorites_set = set(favorites)
-    return [m for m in models if m["id"] in favorites_set]
+    favorites_set = {str(favorite) for favorite in favorites}
+    filtered: List[Dict[str, Any]] = []
+    for model in models:
+        model_id = str(model.get("id") or "")
+        candidates = {model_id}
+        model_key = model.get("key")
+        if model_key:
+            candidates.add(str(model_key))
+        provider_id = model.get("provider")
+        if provider_id and model_id:
+            candidates.add(f"{provider_id}:{model_id}")
+        if candidates & favorites_set:
+            filtered.append(model)
+    return filtered
 
 
 @router.get("/chat/completions/models")
-async def list_completion_models():
+async def list_completion_models(request: Request):
     """
     Return model catalog for completions endpoint.
 
@@ -1060,23 +1561,28 @@ async def list_completion_models():
     Only returns starred/favorite models if any are set.
     """
     models = await _list_models()
+    models = _filter_models_for_request(models, request)
     models = _filter_by_favorites(models)
     data = [{"id": m["id"], "object": "model", "label": m.get("label", m["id"])} for m in models]
     return {"object": "list", "data": data, "models": models}
 
 
 @router.get("/completions/models")
-async def legacy_list_completion_models():
-    return await list_completion_models()
+async def legacy_list_completion_models(request: Request):
+    return await list_completion_models(request)
 
 
 @router.get("/models")
-async def list_models_root():
+async def list_models_root(request: Request):
     """OpenAI-compatible models list at the root of /v1 for OpenWebUI/OpenAI clients.
     
     Only returns starred/favorite models if any are set.
     """
     models = await _list_models()
+    models = _filter_models_for_request(models, request)
     models = _filter_by_favorites(models)
-    data = [{"id": m["id"], "object": "model"} for m in models]
+    data = [
+        {"id": m.get("key") or m["id"], "object": "model"}
+        for m in models
+    ]
     return {"object": "list", "data": data, "models": models}

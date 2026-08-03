@@ -283,12 +283,6 @@ function createServerItem(serverName, state) {
     
     const toggle = document.createElement('div');
     toggle.className = `toggle ${state.enabled ? 'on' : ''}`;
-    // Bind via JS and also via attribute to ensure global handler works across environments
-    toggle.onclick = (e) => {
-        e.stopPropagation();
-        toggleServer(toggle, serverName);
-    };
-    toggle.setAttribute('onclick', `event.stopPropagation(); toggleServer(this, '${serverName}')`);
     
     const expandIcon = document.createElement('svg');
     expandIcon.className = 'expand-icon';
@@ -316,8 +310,6 @@ function createServerItem(serverName, state) {
         const toolTag = document.createElement('span');
         toolTag.className = `tool-tag ${enabled ? 'enabled' : 'disabled'} ${state.enabled && state.connected ? '' : 'inactive'}`;
         toolTag.textContent = toolName;
-        toolTag.onclick = () => toggleTool(toolTag, toolName);
-        toolTag.setAttribute('onclick', `toggleTool(this, '${toolName}')`);
         toolsGrid.appendChild(toolTag);
     });
     

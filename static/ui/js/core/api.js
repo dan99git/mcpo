@@ -34,6 +34,48 @@ async function fetchJson(path, options = {}) {
     }
 }
 
+function getApiErrorMessage(response, data, fallbackMessage) {
+    const apiError = data && data.error;
+    if (apiError && typeof apiError === 'object' && apiError.message) {
+        return String(apiError.message);
+    }
+    if (typeof apiError === 'string' && apiError) {
+        return apiError;
+    }
+    if (data && typeof data.detail === 'string' && data.detail) {
+        return data.detail;
+    }
+    if (data && data.detail && typeof data.detail.message === 'string') {
+        return data.detail.message;
+    }
+    if (response && response.status) {
+        return fallbackMessage + ' (HTTP ' + response.status + ')';
+    }
+    return fallbackMessage;
+}
+
+async function fetchMetaData(path, options = {}, fallbackMessage = 'API request failed') {
+    const { response, data } = await fetchJson(path, options);
+    if (!response.ok || !data || data.ok !== true) {
+        const error = new Error(getApiErrorMessage(response, data, fallbackMessage));
+        error.status = response.status || 0;
+        error.code = data && data.error && data.error.code
+            ? String(data.error.code)
+            : '';
+        error.details = data && data.error ? data.error.details : undefined;
+        throw error;
+    }
+    return data;
+}
+
+function requireApiValue(data, key, validator, label) {
+    const value = data ? data[key] : undefined;
+    if (!validator(value)) {
+        throw new Error('API returned an invalid ' + label + ' response.');
+    }
+    return value;
+}
+
 // Real API Functions
 async function fetchServers() {
     try {
@@ -289,66 +331,169 @@ async function loadAboutContent() {
 }
 
 async function fetchSkills() {
-    try {
-        const { data } = await fetchJson('/_meta/skills');
-        if (data && data.ok && Array.isArray(data.skills)) {
-            return data.skills;
-        }
-    } catch (error) {
-        console.error('Error fetching skills:', error);
-    }
-    return [];
+    const catalog = await fetchSkillsCatalog();
+    return catalog.skills;
+}
+
+async function fetchSkillsCatalog() {
+    const data = await fetchMetaData('/_meta/skills', {}, 'Failed to load skills');
+    return {
+        skills: requireApiValue(data, 'skills', Array.isArray, 'skills'),
+        issues: Array.isArray(data.issues) ? data.issues : [],
+    };
 }
 
 async function fetchSkill(skillId) {
-    try {
-        const { data } = await fetchJson(`/_meta/skills/${encodeURIComponent(skillId)}`);
-        if (data && data.ok && data.skill) {
-            return data.skill;
-        }
-    } catch (error) {
-        console.error('Error fetching skill:', error);
-    }
-    return null;
+    const data = await fetchMetaData(
+        '/_meta/skills/' + encodeURIComponent(skillId),
+        {},
+        'Failed to load skill ' + skillId,
+    );
+    return requireApiValue(
+        data,
+        'skill',
+        (value) => !!value && typeof value === 'object',
+        'skill',
+    );
 }
 
 async function saveSkill(payload) {
-    try {
-        const { data } = await fetchJson('/_meta/skills', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload || {}),
-        });
-        return !!(data && data.ok);
-    } catch (error) {
-        console.error('Error saving skill:', error);
-        return false;
-    }
+    await fetchMetaData('/_meta/skills', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to save skill');
+    return true;
 }
 
 async function deleteSkill(skillId) {
-    try {
-        const { data } = await fetchJson(`/_meta/skills/${encodeURIComponent(skillId)}`, {
-            method: 'DELETE',
-        });
-        return !!(data && data.ok);
-    } catch (error) {
-        console.error('Error deleting skill:', error);
-        return false;
-    }
+    await fetchMetaData('/_meta/skills/' + encodeURIComponent(skillId), {
+        method: 'DELETE',
+    }, 'Failed to delete skill ' + skillId);
+    return true;
 }
 
 async function setSkillEnabled(skillId, enabled) {
     const suffix = enabled ? 'enable' : 'disable';
-    try {
-        const { data } = await fetchJson(`/_meta/skills/${encodeURIComponent(skillId)}/${suffix}`, {
+    const path = '/_meta/skills/' + encodeURIComponent(skillId) + '/' + suffix;
+    await fetchMetaData(path, {
+        method: 'POST',
+    }, 'Failed to ' + suffix + ' skill ' + skillId);
+    return true;
+}
+
+async function fetchCliPackages() {
+    const data = await fetchMetaData(
+        '/_meta/cli-packages',
+        {},
+        'Failed to load installed CLI packages',
+    );
+    return requireApiValue(data, 'packages', Array.isArray, 'CLI packages');
+}
+
+async function planCliPackage(payload) {
+    const data = await fetchMetaData('/_meta/cli-packages/plan', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to plan CLI package installation');
+    return requireApiValue(
+        data,
+        'plan',
+        (value) => !!value && typeof value === 'object',
+        'CLI package plan',
+    );
+}
+
+async function installCliPackage(payload) {
+    const data = await fetchMetaData('/_meta/cli-packages/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to install CLI package');
+    return requireApiValue(
+        data,
+        'package',
+        (value) => !!value && typeof value === 'object',
+        'installed CLI package',
+    );
+}
+
+async function uninstallCliPackage(packageId, confirmed) {
+    const path = '/_meta/cli-packages/' + encodeURIComponent(packageId) + '/uninstall';
+    return fetchMetaData(
+        path,
+        {
             method: 'POST',
-        });
-        return !!(data && data.ok);
-    } catch (error) {
-        console.error('Error toggling skill:', error);
-        return false;
-    }
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmed: confirmed === true }),
+        },
+        'Failed to uninstall CLI package ' + packageId,
+    );
+}
+
+async function fetchSkillPackages() {
+    const data = await fetchMetaData(
+        '/_meta/skill-packages',
+        {},
+        'Failed to load installed skill packages',
+    );
+    return requireApiValue(data, 'packages', Array.isArray, 'skill packages');
+}
+
+async function inspectSkillPackage(payload) {
+    const data = await fetchMetaData('/_meta/skill-packages/inspect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to inspect skill package');
+    return requireApiValue(
+        data,
+        'inspection',
+        (value) => !!value && typeof value === 'object',
+        'skill package inspection',
+    );
+}
+
+async function previewToolManifestArchive(payload) {
+    const data = await fetchMetaData('/_meta/tool-manifests/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to preview TOOL.yaml proposal');
+    return requireApiValue(
+        data,
+        'preview',
+        (value) => !!value && typeof value === 'object',
+        'TOOL.yaml proposal preview',
+    );
+}
+
+async function installSkillPackage(payload) {
+    const data = await fetchMetaData('/_meta/skill-packages/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    }, 'Failed to install skill package');
+    return requireApiValue(
+        data,
+        'package',
+        (value) => !!value && typeof value === 'object',
+        'installed skill package',
+    );
+}
+
+async function uninstallSkillPackage(packageId, confirmed) {
+    const path = '/_meta/skill-packages/' + encodeURIComponent(packageId) + '/uninstall';
+    return fetchMetaData(
+        path,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ confirmed: confirmed === true }),
+        },
+        'Failed to uninstall skill package ' + packageId,
+    );
 }
 
 // Expose for inline handlers
@@ -357,7 +502,17 @@ window.installDependencies = installDependencies;
 window.saveRequirements = saveRequirements;
 window.loadAboutContent = loadAboutContent;
 window.fetchSkills = fetchSkills;
+window.fetchSkillsCatalog = fetchSkillsCatalog;
 window.fetchSkill = fetchSkill;
 window.saveSkill = saveSkill;
 window.deleteSkill = deleteSkill;
 window.setSkillEnabled = setSkillEnabled;
+window.fetchCliPackages = fetchCliPackages;
+window.planCliPackage = planCliPackage;
+window.installCliPackage = installCliPackage;
+window.uninstallCliPackage = uninstallCliPackage;
+window.fetchSkillPackages = fetchSkillPackages;
+window.inspectSkillPackage = inspectSkillPackage;
+window.previewToolManifestArchive = previewToolManifestArchive;
+window.installSkillPackage = installSkillPackage;
+window.uninstallSkillPackage = uninstallSkillPackage;

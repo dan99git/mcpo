@@ -100,12 +100,8 @@ class RunnerService:
                 # Execute without timeout
                 result = await session.call_tool(endpoint_name, arguments=arguments)
             
-            # Track metrics
-            execution_time = time.time() - start_time
-            self._update_metrics(endpoint_name, execution_time, success=True)
-            
             # Process error results
-            if result.isError:
+            if result.is_error:
                 error_message = "Unknown tool execution error"
                 error_data = None
                 
@@ -126,6 +122,8 @@ class RunnerService:
             # Local import to avoid circular import with mcpo.utils.main
             from mcpo.utils.main import process_tool_response
             response_data = process_tool_response(result)
+            execution_time = time.time() - start_time
+            self._update_metrics(endpoint_name, execution_time, success=True)
             # Return primitives only; envelope building is done in handler
             return response_data[0] if len(response_data) == 1 else response_data
             

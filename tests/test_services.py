@@ -9,13 +9,15 @@ import asyncio
 import json
 import os
 import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
 
-from mcpo.services.state import StateManager
+from mcpo.services.state import StateLoadError, StateManager, StateSaveError
 from mcpo.services.chat_sessions import ChatSession, ChatSessionManager
 from mcpo.services.logging import LogManager, LogLevel
 from mcpo.services.metrics import MetricsAggregator
@@ -105,12 +107,67 @@ class TestStateManager:
             t.join()
         assert errors == [], f"Thread safety errors: {errors}"
 
-    def test_corrupt_state_file(self, tmp_path: Path):
-        """Corrupt state file causes graceful fallback, not a crash."""
+    def test_corrupt_state_file_fails_startup(self, tmp_path: Path):
+        """A corrupt persisted policy must not silently enable every tool."""
         state_file = tmp_path / "state.json"
         state_file.write_text("NOT VALID JSON {{{")
+
+        with pytest.raises(StateLoadError, match="Failed to load persisted state"):
+            StateManager(str(state_file))
+
+    def test_corrupt_reload_retains_last_known_good_policy(self, tmp_path: Path):
+        state_file = tmp_path / "state.json"
         sm = StateManager(str(state_file))
-        assert sm.get_all_states() == {}
+        sm.set_server_enabled("alpha", False)
+        sm.set_tool_enabled("alpha", "danger", False)
+
+        state_file.write_text("NOT VALID JSON {{{")
+
+        assert sm.refresh_if_changed() is True
+        assert sm.is_server_enabled("alpha") is False
+        assert sm.is_tool_enabled("alpha", "danger") is False
+        assert sm.get_state_load_error() is not None
+
+    def test_failed_save_raises_and_restores_persisted_policy(self, tmp_path: Path):
+        state_file = tmp_path / "state.json"
+        sm = StateManager(str(state_file))
+        sm.set_tool_enabled("alpha", "danger", False)
+        persisted = state_file.read_text(encoding="utf-8")
+
+        with patch(
+            "mcpo.services.state.os.replace",
+            side_effect=OSError("disk full"),
+        ):
+            with pytest.raises(StateSaveError, match="disk full"):
+                sm.set_tool_enabled("alpha", "danger", True)
+
+        assert sm.is_tool_enabled("alpha", "danger") is False
+        assert state_file.read_text(encoding="utf-8") == persisted
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_fsync_failure_aborts_state_replacement(self, tmp_path: Path):
+        state_file = tmp_path / "state.json"
+        sm = StateManager(str(state_file))
+        sm.set_server_enabled("alpha", False)
+        persisted = state_file.read_bytes()
+
+        with patch(
+            "mcpo.services.state.os.fsync",
+            side_effect=OSError("flush failed"),
+        ):
+            with pytest.raises(StateSaveError, match="flush failed"):
+                sm.set_server_enabled("alpha", True)
+
+        assert sm.is_server_enabled("alpha") is False
+        assert state_file.read_bytes() == persisted
+        assert list(tmp_path.glob("*.tmp")) == []
+
+    def test_invalid_state_shape_fails_startup(self, tmp_path: Path):
+        state_file = tmp_path / "state.json"
+        state_file.write_text('{"server_states": []}')
+
+        with pytest.raises(StateLoadError, match="server_states"):
+            StateManager(str(state_file))
 
     def test_state_file_does_not_exist(self, tmp_path: Path):
         """Non-existent state file creates a fresh empty state."""
@@ -204,6 +261,45 @@ class TestChatSessionManager:
         assert s1.id in ids
         assert s2.id in ids
         assert len(sessions) == 2
+
+    @staticmethod
+    def _expire(session: ChatSession, mgr: ChatSessionManager) -> None:
+        mgr.MAX_SESSIONS = 10
+        mgr.SESSION_TTL_SECONDS = 60
+        session.last_accessed = datetime.now(timezone.utc) - timedelta(seconds=61)
+
+    @pytest.mark.asyncio
+    async def test_get_session_removes_expired_session(self):
+        mgr = ChatSessionManager()
+        session = await mgr.create_session(model="m1")
+        self._expire(session, mgr)
+
+        with pytest.raises(KeyError, match="not found"):
+            await mgr.get_session(session.id)
+
+        assert session.id not in mgr._sessions
+
+    @pytest.mark.asyncio
+    async def test_list_sessions_removes_expired_sessions(self):
+        mgr = ChatSessionManager()
+        expired = await mgr.create_session(model="old")
+        active = await mgr.create_session(model="new")
+        self._expire(expired, mgr)
+
+        sessions = await mgr.list_sessions()
+
+        assert [session.id for session in sessions] == [active.id]
+
+    @pytest.mark.asyncio
+    async def test_reset_session_removes_expired_session(self):
+        mgr = ChatSessionManager()
+        session = await mgr.create_session(model="m1")
+        self._expire(session, mgr)
+
+        with pytest.raises(KeyError, match="not found"):
+            await mgr.reset_session(session.id)
+
+        assert session.id not in mgr._sessions
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +544,7 @@ class TestRunnerService:
 
         content = types.TextContent(type="text", text=text)
         result = MagicMock()
-        result.isError = False
+        result.is_error = False
         result.content = [content]
         return result
 
@@ -458,7 +554,7 @@ class TestRunnerService:
 
         content = types.TextContent(type="text", text=text)
         result = MagicMock()
-        result.isError = True
+        result.is_error = True
         result.content = [content]
         return result
 
@@ -537,13 +633,9 @@ class TestRunnerService:
         with pytest.raises(HTTPException):
             await runner.execute_tool(session, "err_tool", {})
 
-        # isError results still count the call but not as a metric error
-        # (metric errors are only for exceptions/timeouts, not tool-level isError)
-        # Actually, looking at the code: isError raises HTTPException which is
-        # re-raised in the except block, so success=True was set before the raise.
-        # Let's verify what actually happens:
         metrics = runner.get_metrics()
-        assert "err_tool" in metrics
+        assert metrics["err_tool"]["calls"] == 1
+        assert metrics["err_tool"]["errors"] == 1
 
     def test_reset_metrics(self):
         runner = RunnerService()
@@ -580,3 +672,107 @@ class TestRunnerService:
         ):
             result = await runner.execute_tool(session, "multi_tool", {})
         assert result == ["part1", "part2"]
+
+
+# ---------------------------------------------------------------------------
+# Generated tool route state
+# ---------------------------------------------------------------------------
+
+
+class TestGeneratedToolRouteState:
+    """Tests for server and tool state enforcement on direct tool routes."""
+
+    @staticmethod
+    def _build_app(form_model_fields):
+        from mcp import types
+        from mcpo.utils.main import get_tool_handler
+
+        session = AsyncMock()
+        session.call_tool = AsyncMock(
+            return_value=types.CallToolResult(content=[], is_error=False)
+        )
+        app = FastAPI(title="reported-server-name")
+        app.state.config_key = "configured-server"
+        handler = get_tool_handler(session, "demo", form_model_fields)
+        app.post("/demo")(handler)
+        return app, session
+
+    @pytest.mark.parametrize(
+        ("form_model_fields", "payload"),
+        [
+            (None, None),
+            ({"value": (str, ...)}, {"value": "test"}),
+        ],
+        ids=["no-args", "parameterized"],
+    )
+    @pytest.mark.parametrize(
+        ("server_enabled", "tool_enabled"),
+        [
+            (False, True),
+            (True, False),
+        ],
+        ids=["server-disabled", "tool-disabled"],
+    )
+    def test_direct_route_requires_server_and_tool_enabled(
+        self,
+        monkeypatch,
+        form_model_fields,
+        payload,
+        server_enabled,
+        tool_enabled,
+    ):
+        state_manager = MagicMock()
+        state_manager.is_server_enabled.return_value = server_enabled
+        state_manager.is_tool_enabled.return_value = tool_enabled
+        monkeypatch.setattr(
+            "mcpo.utils.main.get_state_manager", lambda: state_manager
+        )
+        app, session = self._build_app(form_model_fields)
+
+        client = TestClient(app)
+        response = client.post("/demo", json=payload) if payload else client.post("/demo")
+
+        assert response.status_code == 403
+        session.call_tool.assert_not_awaited()
+        state_manager.is_server_enabled.assert_called_once_with("configured-server")
+        state_manager.is_tool_enabled.assert_called_once_with("configured-server", "demo")
+
+    @pytest.mark.parametrize(
+        ("form_model_fields", "payload"),
+        [
+            (None, None),
+            ({"value": (str, ...)}, {"value": "test"}),
+        ],
+        ids=["no-args", "parameterized"],
+    )
+    def test_direct_route_uses_parent_app_state_manager(
+        self,
+        monkeypatch,
+        form_model_fields,
+        payload,
+    ):
+        global_state_manager = MagicMock()
+        global_state_manager.is_server_enabled.return_value = False
+        global_state_manager.is_tool_enabled.return_value = False
+        monkeypatch.setattr(
+            "mcpo.utils.main.get_state_manager", lambda: global_state_manager
+        )
+
+        parent_state_manager = MagicMock()
+        parent_state_manager.is_server_enabled.return_value = True
+        parent_state_manager.is_tool_enabled.return_value = True
+        parent_app = FastAPI()
+        parent_app.state.state_manager = parent_state_manager
+
+        app, session = self._build_app(form_model_fields)
+        app.state.parent_app = parent_app
+        client = TestClient(app)
+        response = client.post("/demo", json=payload) if payload else client.post("/demo")
+
+        assert response.status_code == 200
+        session.call_tool.assert_awaited_once()
+        parent_state_manager.is_server_enabled.assert_called_once_with("configured-server")
+        parent_state_manager.is_tool_enabled.assert_called_once_with(
+            "configured-server", "demo"
+        )
+        global_state_manager.is_server_enabled.assert_not_called()

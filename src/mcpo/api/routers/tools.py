@@ -40,8 +40,8 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
         endpoint_name = tool.name
         endpoint_description = tool.description
 
-        inputSchema = tool.inputSchema
-        outputSchema = getattr(tool, "outputSchema", None)
+        inputSchema = tool.input_schema
+        outputSchema = getattr(tool, "output_schema", None)
 
         form_model_fields = get_model_fields(
             f"{endpoint_name}_form_model",

@@ -79,6 +79,12 @@
     color: var(--text-primary);
 }
 
+.sk-list-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
 .sk-list {
     flex: 1;
     overflow-y: auto;
@@ -138,6 +144,31 @@
     margin-top: 2px;
 }
 
+.sk-card-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+}
+
+.sk-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 18px;
+    padding: 2px 6px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1;
+}
+
+.sk-badge-source {
+    border-color: color-mix(in oklab, var(--accent) 38%, var(--border));
+    color: var(--text-primary);
+}
+
 /* Editor panel */
 
 .sk-editor-panel {
@@ -149,6 +180,37 @@
     border: 1px solid var(--border);
     border-radius: 10px;
     overflow: hidden;
+}
+
+.sk-status {
+    flex: none;
+    margin: 12px 16px 0;
+    padding: 9px 11px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.4;
+}
+
+.sk-status.status-error {
+    border-color: color-mix(in oklab, var(--error) 55%, var(--border));
+    color: var(--error);
+}
+
+.sk-status.status-success {
+    border-color: color-mix(in oklab, var(--success) 55%, var(--border));
+    color: var(--success);
+}
+
+.sk-status.status-warning {
+    border-color: #b7791f;
+    color: #b7791f;
+}
+
+[data-theme="dark"] .sk-status.status-warning {
+    color: #fbbf24;
 }
 
 .sk-empty {
@@ -198,7 +260,7 @@
     border-bottom: 1px solid var(--border-light);
 }
 
-.sk-editor-toolbar-left { display: flex; align-items: center; gap: 8px; }
+.sk-editor-toolbar-left { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .sk-editor-toolbar-right { display: flex; align-items: center; gap: 8px; }
 
 .sk-editor-mode {
@@ -207,6 +269,11 @@
     color: var(--text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
+}
+
+.sk-editor-meta {
+    color: var(--text-secondary);
+    font-size: 11px;
 }
 
 .sk-field-group {
@@ -252,6 +319,11 @@
     cursor: default;
 }
 
+.sk-input:disabled {
+    opacity: 0.55;
+    cursor: not-allowed;
+}
+
 .sk-textarea-sm {
     min-height: 60px;
     resize: vertical;
@@ -266,6 +338,240 @@
     line-height: 1.5;
 }
 
+/* Skills package installer */
+
+.sk-installer {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 16px 20px 20px;
+}
+
+.sk-installer-toolbar {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border-light);
+}
+
+.sk-installer-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 16px;
+}
+
+.sk-installer-subtitle {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+.sk-installer-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.sk-installer-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.sk-install-section {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--bg-secondary);
+}
+
+.sk-install-section-header h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 14px;
+}
+
+.sk-install-section-header p {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+.sk-install-form {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin-top: 14px;
+}
+
+.sk-install-inline {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sk-install-inline .sk-input {
+    flex: 1;
+    min-width: 0;
+}
+
+.sk-file-input {
+    padding: 6px 8px;
+    background: var(--bg-primary);
+    font-size: 11px;
+}
+
+.sk-field-hint {
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.4;
+}
+
+.sk-review {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    margin-top: 12px;
+    padding: 11px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+
+.sk-review-summary {
+    color: var(--text-primary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.sk-review-title {
+    font-weight: 600;
+}
+
+.sk-review-meta {
+    margin-top: 2px;
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.sk-review-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.sk-review-warnings {
+    color: #b7791f;
+    font-size: 11px;
+    line-height: 1.4;
+}
+
+[data-theme="dark"] .sk-review-warnings {
+    color: #fbbf24;
+}
+
+.sk-confirm {
+    display: flex;
+    align-items: flex-start;
+    gap: 7px;
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1.4;
+    cursor: pointer;
+}
+
+.sk-confirm input {
+    flex: none;
+    margin: 2px 0 0;
+}
+
+.sk-confirm-muted {
+    color: var(--text-secondary);
+}
+
+.sk-command-preview {
+    display: block;
+    overflow-x: auto;
+    padding: 8px;
+    border-radius: 6px;
+    background: var(--bg-tertiary);
+    color: var(--text-primary);
+    font-size: 10px;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+.sk-installed-header {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.35px;
+}
+
+.sk-package-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.sk-package-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--bg-primary);
+}
+
+.sk-package-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.sk-package-name {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
+}
+
+.sk-package-detail {
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.sk-package-row .btn {
+    flex: none;
+    padding: 5px 8px;
+    font-size: 10px;
+}
+
+.sk-installer .btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+@media (max-width: 1100px) {
+    .sk-installer-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
 @media (max-width: 768px) {
     .sk-layout {
         flex-direction: column;
@@ -274,6 +580,16 @@
     .sk-list-panel {
         width: 100%;
         max-height: 200px;
+    }
+
+    .sk-installer-toolbar,
+    .sk-install-inline {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .sk-installer-actions {
+        align-self: flex-end;
     }
 }
 

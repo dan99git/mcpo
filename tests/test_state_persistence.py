@@ -8,9 +8,14 @@ from mcpo.services.state import get_state_manager
 
 
 @pytest.mark.asyncio
-async def test_enable_disable_persists_state(tmp_path):
+async def test_enable_disable_persists_state(tmp_path, monkeypatch):
     """Test that enable/disable state persists via StateManager."""
     from mcpo.main import build_main_app
+    from mcpo.services import state as state_mod
+    from mcpo.services.state import StateManager
+
+    state_manager = StateManager(str(tmp_path / "state.json"))
+    monkeypatch.setattr(state_mod, "_global_state_manager", state_manager)
 
     # Create a dummy config file
     cfg_path = tmp_path / 'mcpo.json'
@@ -19,7 +24,7 @@ async def test_enable_disable_persists_state(tmp_path):
     app = await build_main_app(config_path=str(cfg_path))
     client = TestClient(app)
 
-    state_manager = get_state_manager()
+    assert get_state_manager() is state_manager
 
     # Disable server via endpoint
     r = client.post('/_meta/servers/s1/disable')
@@ -62,6 +67,37 @@ async def test_state_manager_version_and_persistence(tmp_path):
     assert manager2.is_tool_enabled('sA', 'toolY') is False
 
 
+def test_state_manager_refreshes_changes_written_by_another_process(tmp_path):
+    from mcpo.services.state import StateManager
+
+    state_file = tmp_path / "shared_state.json"
+    first = StateManager(state_file_path=str(state_file))
+    first.set_server_enabled("shared", True)
+    second = StateManager(state_file_path=str(state_file))
+
+    second.set_server_enabled("shared", False)
+
+    assert first.is_server_enabled("shared") is True
+    assert first.refresh_if_changed() is True
+    assert first.is_server_enabled("shared") is False
+    assert first.refresh_if_changed() is False
+
+
+def test_state_manager_merges_writes_from_two_live_instances(tmp_path):
+    from mcpo.services.state import StateManager
+
+    state_file = tmp_path / "shared_state.json"
+    first = StateManager(state_file_path=str(state_file))
+    second = StateManager(state_file_path=str(state_file))
+
+    first.set_server_enabled("alpha", False)
+    second.set_server_enabled("beta", False)
+
+    persisted = StateManager(state_file_path=str(state_file))
+    assert persisted.is_server_enabled("alpha") is False
+    assert persisted.is_server_enabled("beta") is False
+
+
 @pytest.mark.asyncio
 async def test_read_only_flag_blocks_mutations(tmp_path):
     from mcpo.main import build_main_app
@@ -96,7 +132,7 @@ async def test_metrics_stub_counts_disabled_and_timeout(tmp_path, monkeypatch):
     class FakeTimeoutSession:
         async def call_tool(self, name, arguments):
             await asyncio.sleep(0.01)
-            return type('R', (), {'isError': False, 'content': []})
+            return type('R', (), {'is_error': False, 'content': []})
 
     # Build app
     app = await build_main_app()

@@ -22,7 +22,7 @@ class ConfigManager:
         """Validate a configuration file."""
         try:
             config_data = load_config(config_path)
-            typer.echo(f"✅ Configuration file {config_path} is valid")
+            typer.echo(f"Configuration file {config_path} is valid")
             
             servers = config_data.get("mcpServers", {})
             typer.echo(f"Found {len(servers)} server(s):")
@@ -41,7 +41,7 @@ class ConfigManager:
             return True
             
         except Exception as e:
-            typer.echo(f"❌ Configuration validation failed: {e}")
+            typer.echo(f"Configuration validation failed: {e}")
             return False
     
     @staticmethod
@@ -85,13 +85,13 @@ class ConfigManager:
             with open(config_path, "w") as f:
                 json.dump(sample_config, f, indent=2)
             
-            typer.echo(f"✅ Sample configuration created: {config_path}")
+            typer.echo(f"Sample configuration created: {config_path}")
             typer.echo("Edit the file to configure your MCP servers.")
             typer.echo("Environment variables like ${API_KEY} will be expanded at runtime.")
             return True
             
         except Exception as e:
-            typer.echo(f"❌ Failed to create configuration: {e}")
+            typer.echo(f"Failed to create configuration: {e}")
             return False
     
     @staticmethod
@@ -106,10 +106,10 @@ class ConfigManager:
             return True
             
         except FileNotFoundError:
-            typer.echo(f"❌ Configuration file not found: {config_path}")
+            typer.echo(f"Configuration file not found: {config_path}")
             return False
         except Exception as e:
-            typer.echo(f"❌ Failed to read configuration: {e}")
+            typer.echo(f"Failed to read configuration: {e}")
             return False
 
 
@@ -141,7 +141,7 @@ class ServerRunner:
     def validate_server_config(config_path: Optional[str], server_command: Optional[List[str]]) -> bool:
         """Validate that we have either a config file or server command."""
         if not config_path and not server_command:
-            typer.echo("❌ Error: Must specify either --config or provide MCP command after '--'")
+            typer.echo("Error: Must specify either --config or provide MCP command after '--'")
             typer.echo("")
             typer.echo("Examples:")
             typer.echo("  mcpo serve --config mcpo.json")
@@ -159,7 +159,7 @@ class ServerRunner:
                 load_dotenv(env_path)
                 typer.echo(f"Loaded environment from: {env_path}")
             else:
-                typer.echo(f"⚠️  Warning: Environment file not found: {env_path}")
+                typer.echo(f"Warning: Environment file not found: {env_path}")
     
     @staticmethod
     def normalize_path_prefix(path_prefix: Optional[str]) -> str:
@@ -175,21 +175,30 @@ class ServerRunner:
         return path_prefix
     
     @staticmethod
+    def _safe_echo(msg: str) -> None:
+        """Echo with fallback for terminals that can't render Unicode (e.g. Windows cp1252)."""
+        try:
+            typer.echo(msg)
+        except UnicodeEncodeError:
+            typer.echo(msg.encode("ascii", errors="replace").decode("ascii"))
+
+    @staticmethod
     def display_startup_info(
-        config_path: Optional[str], 
-        server_command: Optional[List[str]], 
-        host: str, 
+        config_path: Optional[str],
+        server_command: Optional[List[str]],
+        host: str,
         port: int
     ) -> None:
         """Display server startup information."""
+        echo = ServerRunner._safe_echo
         if config_path:
-            typer.echo(f"🚀 Starting MCPO with config: {config_path}")
+            echo(f"Starting MCPO with config: {config_path}")
         else:
-            typer.echo(f"🚀 Starting MCPO on {host}:{port}")
-            typer.echo(f"   Command: {' '.join(server_command)}")
-        
-        typer.echo(f"   Server will be available at: http://{host}:{port}")
-        typer.echo(f"   API documentation at: http://{host}:{port}/docs")
+            echo(f"Starting MCPO on {host}:{port}")
+            echo(f"   Command: {' '.join(server_command)}")
+
+        echo(f"   Server will be available at: http://{host}:{port}")
+        echo(f"   API documentation at: http://{host}:{port}/docs")
     
     @staticmethod
     async def start_server(

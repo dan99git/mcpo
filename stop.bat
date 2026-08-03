@@ -1,28 +1,22 @@
 @echo off
 setlocal
 
-set "PORTS=8000 8001"
-echo Stopping services listening on ports: %PORTS%
+rem Stop the watchdog FIRST so it cannot resurrect services mid-stop.
+rem The watchdog writes its PID to logs\watchdog.pid; the IMAGENAME filter
+rem guarantees a stale/reused PID never kills anything but a powershell.
+set "WD_PID_FILE=%~dp0logs\watchdog.pid"
+if not exist "%WD_PID_FILE%" goto WATCHDOG_DONE
+set /p WDPID=<"%WD_PID_FILE%"
+if not defined WDPID goto WATCHDOG_DONE
+echo Stopping MCPO Watchdog (PID %WDPID%)...
+taskkill /FI "PID eq %WDPID%" /FI "IMAGENAME eq powershell.exe" /T /F >nul 2>&1
+del "%WD_PID_FILE%" >nul 2>&1
+:WATCHDOG_DONE
 
-powershell -NoProfile -Command ^
-  "$ports = @(8000,8001);" ^
-  "$killed = @();" ^
-  "foreach ($port in $ports) {" ^
-  "  $connections = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue;" ^
-  "  foreach ($conn in $connections) {" ^
-  "    $procId = $conn.OwningProcess;" ^
-  "    if ($procId -and -not ($killed -contains $procId)) {" ^
-  "      try {" ^
-  "        Stop-Process -Id $procId -Force -ErrorAction Stop;" ^
-  "        Write-Host ('Stopped PID {0} on port {1}' -f $procId, $port);" ^
-  "        $killed += $procId;" ^
-  "      } catch {" ^
-  "        Write-Warning ('Failed to stop PID {0} on port {1}: {2}' -f $procId, $port, $_.Exception.Message);" ^
-  "      }" ^
-  "    }" ^
-  "  }" ^
-  "}" ^
-  "if (-not $killed) { Write-Host 'No matching listeners found.' }"
+set "PORTS=8000 8001 8351"
+echo Stopping services listening on ports: %PORTS% (including their child process trees)
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "& '%~dp0tools\clear_ports.ps1' -Ports 8000,8001,8351"
 if errorlevel 1 (
     echo Failed to stop one or more processes. Try running as Administrator.
 ) else (

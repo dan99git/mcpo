@@ -33,6 +33,8 @@ from mcpo.main import (
     create_sub_app,
     error_envelope,
     MCP_VERSION,
+    spawn_server_runtime,
+    teardown_server_runtime,
 )
 
 logger = logging.getLogger(__name__)
@@ -213,7 +215,7 @@ async def save_config_content(payload: Dict[str, Any], request: Request):
         # Reload in-place
         new_config = load_config(path)
         await reload_config_handler(main_app, new_config)
-        _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
         
         # Invalidate aggregate OpenAPI cache
         main_app.state.aggregate_openapi_dirty = True
@@ -289,7 +291,7 @@ async def save_mcp_servers_content(payload: Dict[str, Any], request: Request):
         # Reload runtime and remount proxy paths
         new_config = load_config(path)
         await reload_config_handler(main_app, new_config)
-        _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
         main_app.state.aggregate_openapi_dirty = True
 
         return {"ok": True, "saved": True, "reloaded": True}
@@ -451,7 +453,7 @@ async def reload_config(request: Request):
         new_config = load_config(path)
         await reload_config_handler(main_app, new_config)
         # Remount FastMCP proxy to reflect changes
-        _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
         
         # Invalidate aggregate OpenAPI cache
         main_app.state.aggregate_openapi_dirty = True
@@ -474,23 +476,40 @@ async def reinit_server(server_name: str, request: Request):
         servers = config_data.get("mcpServers", {})
         if server_name not in servers:
             return JSONResponse(status_code=404, content=error_envelope("Server not found in config", code="not_found"))
-        # Unmount and remount just this server
-        unmount_servers(main_app, getattr(main_app.state, 'path_prefix', '/'), [server_name])
+        # Unmount and remount just this server. Teardown is awaited, so the old
+        # child (if any) is dead before the replacement is created.
+        await unmount_servers(main_app, getattr(main_app.state, 'path_prefix', '/'), [server_name])
         server_cfg = servers[server_name]
+        api_dependency = getattr(main_app.state, 'api_dependency', None)
         sub_app = create_sub_app(
             server_name,
             server_cfg,
             getattr(main_app.state, 'cors_allow_origins', ["*"]),
             getattr(main_app.state, 'api_key', None),
             getattr(main_app.state, 'strict_auth', False),
-            getattr(main_app.state, 'api_dependency', None),
+            api_dependency,
             getattr(main_app.state, 'connection_timeout', None),
             getattr(main_app.state, 'lifespan', None),
         )
+        sub_app.state.parent_app = main_app
         main_app.mount(f"{getattr(main_app.state, 'path_prefix', '/')}{server_name}", sub_app)
+
+        state_manager = get_state_manager()
+        config_disabled = isinstance(server_cfg, dict) and not server_cfg.get("enabled", True)
+        if config_disabled:
+            state_manager.set_server_enabled(server_name, False)
+
+        connected = False
+        if state_manager.is_server_enabled(server_name):
+            runtime = await spawn_server_runtime(main_app, server_name, sub_app, api_dependency=api_dependency)
+            connected = runtime.connected
+        else:
+            sub_app.state.is_connected = False
+            sub_app.state.last_error = "Server disabled"
+
         # Remount FastMCP proxy as well in case config impacts it
-        _mount_or_remount_fastmcp(main_app, base_path="/mcp")
-        return {"ok": True, "reinitialized": True}
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+        return {"ok": True, "reinitialized": True, "connected": connected}
     except Exception as e:
         logger.error(f"Failed to reinit server {server_name}: {e}", exc_info=True)
         return JSONResponse(status_code=500, content=error_envelope("Reinit failed", data=str(e)))
@@ -538,18 +557,33 @@ async def install_dependencies():
 
 @router.post("/servers/{server_name}/enable")
 async def enable_server(server_name: str, request: Request):
-    """Enable a server."""
+    """Enable a server and spawn its connection runtime (guards against duplicate spawn)."""
     try:
-        if getattr(request.app.state, "read_only_mode", False):
+        main_app = request.app
+        if getattr(main_app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
         state_manager = get_state_manager()
         state_manager.set_server_enabled(server_name, True)
-        
+
         # Invalidate aggregate OpenAPI cache
-        request.app.state.aggregate_openapi_dirty = True
-        
+        main_app.state.aggregate_openapi_dirty = True
+
+        sub_app = None
+        for route in main_app.router.routes:
+            if isinstance(route, Mount) and hasattr(route.app, 'state') and route.path.rstrip('/') == f"/{server_name}":
+                sub_app = route.app
+                break
+
+        connected = False
+        if sub_app is not None:
+            api_dependency = getattr(main_app.state, 'api_dependency', None)
+            runtime = await spawn_server_runtime(main_app, server_name, sub_app, api_dependency=api_dependency)
+            connected = runtime.connected
+        else:
+            logger.warning(f"Enable requested for '{server_name}' but no mounted server was found to spawn.")
+
         logger.info(f"Server '{server_name}' enabled")
-        return JSONResponse(content={"ok": True, "enabled": True})
+        return JSONResponse(content={"ok": True, "enabled": True, "connected": connected})
     except Exception as e:
         logger.error(f"Error enabling server {server_name}: {e}")
         return JSONResponse(
@@ -560,18 +594,26 @@ async def enable_server(server_name: str, request: Request):
 
 @router.post("/servers/{server_name}/disable")
 async def disable_server(server_name: str, request: Request):
-    """Disable a server."""
+    """Disable a server: tear down its runtime (session + transport + child) first,
+    then persist the disabled state. Idempotent -- disabling an already-dead server
+    is a no-op success."""
     try:
-        if getattr(request.app.state, "read_only_mode", False):
+        main_app = request.app
+        if getattr(main_app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode", "code": "read_only"}})
+        teardown_result = await teardown_server_runtime(main_app, server_name)
+        if not teardown_result.get("ok", True):
+            logger.error(
+                f"Disable teardown for '{server_name}' reported an error: {teardown_result.get('error')}"
+            )
         state_manager = get_state_manager()
         state_manager.set_server_enabled(server_name, False)
-        
+
         # Invalidate aggregate OpenAPI cache
-        request.app.state.aggregate_openapi_dirty = True
-        
+        main_app.state.aggregate_openapi_dirty = True
+
         logger.info(f"Server '{server_name}' disabled")
-        return JSONResponse(content={"ok": True, "enabled": False})
+        return JSONResponse(content={"ok": True, "enabled": False, "teardown": teardown_result})
     except Exception as e:
         logger.error(f"Error disabling server {server_name}: {e}")
         return JSONResponse(

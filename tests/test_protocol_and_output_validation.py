@@ -13,7 +13,7 @@ async def test_protocol_version_warn_allows_call(tmp_path, monkeypatch):
 
     class FakeSession:
         async def call_tool(self, name, arguments):
-            return type('R', (), {'isError': False, 'content': []})
+            return type('R', (), {'is_error': False, 'content': []})
 
     app = await build_main_app(protocol_version_mode='warn')
     sub = FastAPI(title='sP')
@@ -41,7 +41,7 @@ async def test_protocol_version_warn_does_not_block(tmp_path):
 
     class FakeSession:
         async def call_tool(self, name, arguments):
-            return type('R', (), {'isError': False, 'content': []})
+            return type('R', (), {'is_error': False, 'content': []})
 
     app = await build_main_app(protocol_version_mode='enforce')
     sub = FastAPI(title='sE')
@@ -69,7 +69,7 @@ async def test_tool_call_succeeds_with_correct_protocol_header(tmp_path):
 
     class FakeSession:
         async def call_tool(self, name, arguments):
-            return type('R', (), {'isError': False, 'content': []})
+            return type('R', (), {'is_error': False, 'content': []})
 
     app = await build_main_app(validate_output_mode='off')
     sub = FastAPI(title='sV')
@@ -97,7 +97,7 @@ async def test_latency_metrics_accumulate(tmp_path):
     class FakeSession:
         async def call_tool(self, name, arguments):
             await asyncio.sleep(0.01)
-            return type('R', (), {'isError': False, 'content': []})
+            return type('R', (), {'is_error': False, 'content': []})
 
     app = await build_main_app()
     sub = FastAPI(title='sL')

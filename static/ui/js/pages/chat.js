@@ -3,16 +3,49 @@
 const CHAT_SESSION_STORAGE_KEY = 'mcpo-chat-session-id';
 const FAVORITES_STORAGE_KEY = 'mcpo-chat-favorite-models';
 const MODEL_SEARCH_STORAGE_KEY = 'mcpo-chat-model-search';
+const PROVIDER_FILTER_STORAGE_KEY = 'mcpo-chat-provider-filter';
+const MAX_CHAT_ATTACHMENTS = 8;
+const MAX_CHAT_ATTACHMENT_BYTES = 5 * 1024 * 1024;
+const MAX_CHAT_ATTACHMENT_TOTAL_BYTES = 20 * 1024 * 1024;
+const IMAGE_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
+const TEXT_MIME_TYPES = new Set([
+    'application/json',
+    'application/ld+json',
+    'application/xml',
+    'application/yaml',
+    'application/x-yaml',
+    'application/javascript',
+]);
 
 const chatState = {
     initialized: false,
+    initializing: false,
     sessionId: null,
     session: null,
     models: [],
+    selectedModelKey: '',
+    providerFilter: 'all',
+    modelFilter: 'all',
     skills: [],
     selectedSkillIds: [],
+    skillSelectionExplicit: false,
     favorites: [],
     modelSearch: '',
+    servers: [],
+    serverCatalogLoaded: false,
+    serverCatalogError: '',
+    serverSelectionExplicit: false,
+    serverAllowlist: [],
+    attachments: [],
+    chatSettings: {
+        defaultSystemPrompt: '',
+        temperature: null,
+        maxOutputTokens: 8192,
+        maxToolRounds: 8,
+        includeReasoning: true,
+        reasoningEffort: null,
+        includeManagementTools: false,
+    },
     streaming: false,
     abortController: null,
     buffer: '',
@@ -27,54 +60,96 @@ const chatState = {
 function getChatElements() {
     return {
         modelSelect: document.getElementById('chat-model-select'),
+        modelTrigger: document.getElementById('chat-model-trigger'),
+        selectedModelLabel: document.getElementById('chat-model-selected-label'),
+        selectedModelProvider: document.getElementById('chat-model-selected-provider'),
         modelList: document.getElementById('chat-model-list'),
-        modelListItems: document.getElementById('chat-model-list-items'),
+        modelListItems: document.getElementById('chat-model-groups'),
+        modelListStatus: document.getElementById('chat-model-list-status'),
         modelSearchInput: document.getElementById('chat-model-search'),
+        providerFilterSelect: document.getElementById('chat-provider-filter'),
         modelFavToggle: document.getElementById('chat-model-fav-toggle'),
+        modelFilterButtons: Array.from(document.querySelectorAll('[data-model-filter]')),
         skillToggle: document.getElementById('chat-skill-toggle'),
         skillList: document.getElementById('chat-skill-list'),
         skillListItems: document.getElementById('chat-skill-list-items'),
         activeSkills: document.getElementById('chat-active-skills'),
         resetBtn: document.getElementById('chat-reset-session'),
+        newSessionBtn: document.getElementById('chat-new-session'),
         messagesContainer: document.getElementById('chat-messages'),
         alertsContainer: document.getElementById('chat-alerts'),
         form: document.getElementById('chat-input-form'),
         textarea: document.getElementById('chat-input-text'),
         streamToggle: document.getElementById('chat-stream-toggle'),
         stopBtn: document.getElementById('chat-stop-stream'),
+        sendBtn: document.getElementById('chat-send-button'),
         sessionMeta: document.getElementById('chat-session-meta'),
+        attachmentInput: document.getElementById('chat-attachment-input'),
+        attachmentPreview: document.getElementById('chat-attachment-preview'),
+        temperatureInput: document.getElementById('chat-temperature'),
+        maxOutputInput: document.getElementById('chat-max-output-tokens'),
+        maxToolRoundsInput: document.getElementById('chat-max-tool-rounds'),
+        includeReasoningInput: document.getElementById('chat-include-reasoning'),
+        reasoningEffortSelect: document.getElementById('chat-reasoning-effort'),
+        modelCapabilities: document.getElementById('chat-model-capabilities'),
+        includeManagementTools: document.getElementById('chat-include-management-tools'),
+        allServers: document.getElementById('chat-all-servers'),
+        serverList: document.getElementById('chat-server-list'),
+        refreshToolsBtn: document.getElementById('chat-refresh-tools'),
+        toolCount: document.getElementById('chat-tool-count'),
     };
 }
 
 async function initChatPage() {
-    if (chatState.initialized) {
+    if (chatState.initializing) {
         return;
     }
-    chatState.initialized = true;
+    chatState.initializing = true;
 
     const els = getChatElements();
-    if (!els.modelSelect || !els.form) {
+    if (!els.modelTrigger || !els.form) {
         console.warn('[CHAT] Page elements missing; abort init');
+        chatState.initializing = false;
         return;
     }
 
-    attachEventHandlers(els);
-
-    await loadModels();
-    await loadSkills();
-    await loadFavorites();
-    populateModelSelect();
-    renderSkillList();
-    await ensureSession();
-    renderSession();
+    if (!chatState.initialized) {
+        attachEventHandlers(els);
+        chatState.initialized = true;
+    }
+    try {
+        await Promise.all([
+            loadChatSettings(),
+            loadModels(),
+            loadSkills(),
+            loadFavorites(),
+            loadChatServers(),
+        ]);
+        normalizeFavoriteKeys();
+        renderProviderFilter();
+        populateModelSelect();
+        renderModelList();
+        renderSkillList();
+        renderChatServerList();
+        applyAgentSettingsToControls();
+        await ensureSession();
+        syncProviderFilterToSelectedModel();
+        applyAgentSettingsToControls();
+        renderSession();
+    } catch (error) {
+        console.error('[CHAT] Initialization failed', error);
+        showChatAlert(getChatErrorMessage(error, 'Chat initialization failed'), 'error');
+    } finally {
+        chatState.initializing = false;
+    }
 }
 
 function attachEventHandlers(els) {
-    els.modelSelect.addEventListener('change', async (event) => {
-        if (!chatState.sessionId) return;
-        chatState.session.model = event.target.value;
-        await persistSessionMeta();
+    els.modelTrigger.addEventListener('click', () => {
+        setModelPanelOpen(!chatState.modelPanelOpen);
     });
+
+    els.providerFilterSelect?.addEventListener('change', handleProviderFilterChange);
 
     if (els.resetBtn) {
         els.resetBtn.addEventListener('click', async () => {
@@ -82,17 +157,34 @@ function attachEventHandlers(els) {
         });
     }
 
-    if (els.modelFavToggle) {
-        els.modelFavToggle.addEventListener('click', () => {
-            chatState.modelPanelOpen = !chatState.modelPanelOpen;
-            renderModelList();
+    if (els.newSessionBtn) {
+        els.newSessionBtn.addEventListener('click', async () => {
+            await startNewSession();
         });
     }
+
+    if (els.modelFavToggle) {
+        els.modelFavToggle.addEventListener('click', () => {
+            chatState.modelFilter = 'favorites';
+            setModelPanelOpen(true);
+        });
+    }
+
+    els.modelFilterButtons.forEach((button) => {
+        button.addEventListener('click', () => {
+            chatState.modelFilter = button.dataset.modelFilter || 'all';
+            renderModelList();
+        });
+    });
 
     if (els.skillToggle) {
         els.skillToggle.addEventListener('click', () => {
             if (!els.skillList) return;
             els.skillList.classList.toggle('hidden');
+            els.skillToggle.setAttribute(
+                'aria-expanded',
+                String(!els.skillList.classList.contains('hidden')),
+            );
         });
     }
 
@@ -111,14 +203,80 @@ function attachEventHandlers(els) {
 
     // Enter to send, Shift+Enter for newline
     els.textarea.addEventListener('keydown', async (event) => {
-        if (event.key === 'Enter' && !event.shiftKey) {
+        if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
             event.preventDefault();
             await sendChatMessage();
         }
     });
 
+    els.textarea.addEventListener('input', () => autoSizeComposer(els.textarea));
+
     els.stopBtn.addEventListener('click', () => {
         abortStreaming();
+    });
+
+    els.attachmentInput?.addEventListener('change', async (event) => {
+        await addAttachments(event.target.files);
+        event.target.value = '';
+    });
+
+    els.includeReasoningInput?.addEventListener('change', updateReasoningControls);
+    els.includeManagementTools?.addEventListener('change', async () => {
+        if (!chatState.sessionId) return;
+        const previous = chatState.session?.includeManagementTools === true;
+        try {
+            await updateSession({
+                include_management_tools: els.includeManagementTools.checked,
+                refresh_tools: true,
+            });
+        } catch (error) {
+            els.includeManagementTools.checked = previous;
+            showChatAlert(getChatErrorMessage(error, 'Could not update management tools'), 'error');
+        }
+    });
+    els.allServers?.addEventListener('change', async () => {
+        const previous = chatState.serverAllowlist === null
+            ? null
+            : [...chatState.serverAllowlist];
+        chatState.serverAllowlist = els.allServers.checked
+            ? null
+            : chatState.servers.filter((server) => server.enabled !== false).map((server) => server.name);
+        chatState.serverSelectionExplicit = !els.allServers.checked;
+        renderChatServerList();
+        if (chatState.sessionId) {
+            try {
+                await updateSession({
+                    server_allowlist: chatState.serverAllowlist,
+                    refresh_tools: true,
+                });
+            } catch (error) {
+                chatState.serverAllowlist = previous;
+                renderChatServerList();
+                showChatAlert(getChatErrorMessage(error, 'Could not update server access'), 'error');
+            }
+        }
+    });
+    els.refreshToolsBtn?.addEventListener('click', async () => {
+        if (chatState.sessionId) {
+            try {
+                await updateSession({ refresh_tools: true });
+                showChatAlert('Tool catalog refreshed', 'success');
+            } catch (error) {
+                showChatAlert(getChatErrorMessage(error, 'Could not refresh tools'), 'error');
+            }
+        }
+    });
+
+    document.addEventListener('click', (event) => {
+        if (!chatState.modelPanelOpen) return;
+        const picker = event.target.closest('.chat-model-picker');
+        if (!picker) setModelPanelOpen(false, { restoreFocus: false });
+    });
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && chatState.modelPanelOpen) {
+            event.preventDefault();
+            setModelPanelOpen(false);
+        }
     });
 }
 
@@ -142,22 +300,29 @@ function renderSkillList() {
     const selected = new Set(getSelectedSkillIds());
     const enabledSkills = (chatState.skills || []).filter((item) => item.enabled !== false);
     if (!enabledSkills.length) {
-        skillListItems.innerHTML = '<div class="empty-state">No enabled skills</div>';
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No enabled skills';
+        skillListItems.appendChild(empty);
         renderActiveSkills();
         return;
     }
     enabledSkills.forEach((skill) => {
         const row = document.createElement('label');
-        row.className = 'model-row';
-        row.style.cursor = 'pointer';
-        row.innerHTML = `
-            <input type="checkbox" ${selected.has(skill.id) ? 'checked' : ''} style="margin-right:8px;" />
-            <div class="model-text">
-                <div class="model-label">${escapeHtml(skill.title || skill.id)}</div>
-                <div class="model-sub">${escapeHtml(skill.id)}</div>
-            </div>
-        `;
-        const checkbox = row.querySelector('input[type="checkbox"]');
+        row.className = 'chat-skill-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = selected.has(skill.id);
+        const copy = document.createElement('span');
+        copy.className = 'model-text';
+        const title = document.createElement('strong');
+        title.className = 'model-label';
+        title.textContent = skill.title || skill.id;
+        const id = document.createElement('span');
+        id.className = 'model-sub';
+        id.textContent = skill.id;
+        copy.append(title, id);
+        row.append(checkbox, copy);
         checkbox?.addEventListener('change', async () => {
             const next = new Set(getSelectedSkillIds());
             if (checkbox.checked) {
@@ -166,11 +331,17 @@ function renderSkillList() {
                 next.delete(skill.id);
             }
             chatState.selectedSkillIds = Array.from(next);
-            if (chatState.session) {
-                chatState.session.skillIds = Array.from(next);
-                await persistSessionMeta();
-            } else {
-                renderActiveSkills();
+            chatState.skillSelectionExplicit = true;
+            renderActiveSkills();
+            if (chatState.sessionId) {
+                try {
+                    await updateSession({ skill_ids: chatState.selectedSkillIds });
+                } catch (error) {
+                    checkbox.checked = !checkbox.checked;
+                    chatState.selectedSkillIds = Array.from(selected);
+                    renderActiveSkills();
+                    showChatAlert(getChatErrorMessage(error, 'Could not update session skills'), 'error');
+                }
             }
         });
         skillListItems.appendChild(row);
@@ -182,44 +353,63 @@ function renderActiveSkills() {
     const { activeSkills } = getChatElements();
     if (!activeSkills) return;
     const selected = getSelectedSkillIds();
-    if (!selected.length) {
+    if (!chatState.skillSelectionExplicit) {
         activeSkills.textContent = 'All enabled skills (default)';
         return;
     }
-    activeSkills.textContent = `Selected: ${selected.join(', ')}`;
+    if (!selected.length) {
+        activeSkills.textContent = 'No skills selected';
+        return;
+    }
+    const names = selected.map((id) => {
+        const skill = chatState.skills.find((item) => item.id === id);
+        return skill?.title || id;
+    });
+    activeSkills.textContent = `Selected: ${names.join(', ')}`;
 }
 
 async function loadModels() {
-    try {
-        const { response, data } = await fetchJson('/chat/sessions/models');
-        if (!response.ok || !data.models) {
-            console.warn('[CHAT] Failed to load models', data);
-            return;
-        }
-        chatState.models = data.models || [];
-        renderModelList();
-    } catch (error) {
-        console.error('[CHAT] Error loading models', error);
+    const { response, data } = await fetchJson('/chat/sessions/models');
+    if (!response.ok || !Array.isArray(data?.models)) {
+        chatState.models = [];
+        throw new Error(getApiErrorMessage(response, data, 'Could not load chat models'));
     }
+    chatState.models = data.models
+        .filter((model) => model && model.id && model.provider)
+        .map((model) => ({
+            ...model,
+            id: String(model.id),
+            provider: String(model.provider),
+            key: model.key || `${model.provider}:${model.id}`,
+            label: model.label || model.id,
+            providerLabel: model.providerLabel || model.provider,
+            billing: model.billing || 'unknown',
+            free: model.free === true,
+            capabilities: Array.isArray(model.capabilities) ? model.capabilities : [],
+            inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : ['text'],
+        }));
 }
 
 async function loadFavorites() {
-    // Load from server (primary source of truth)
+    const readLocalFavorites = () => {
+        try {
+            const parsed = JSON.parse(localStorage.getItem(FAVORITES_STORAGE_KEY) || '[]');
+            return Array.isArray(parsed) ? parsed.map(String) : [];
+        } catch {
+            return [];
+        }
+    };
     try {
         const { response, data } = await fetchJson('/chat/sessions/favorites');
         if (response.ok && Array.isArray(data.favorites)) {
-            chatState.favorites = data.favorites;
-            // Sync to localStorage for offline fallback
+            chatState.favorites = data.favorites.map(String);
             localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(chatState.favorites));
         } else {
-            // Fallback to localStorage if server fails
-            const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
-            chatState.favorites = raw ? JSON.parse(raw) : [];
+            chatState.favorites = readLocalFavorites();
         }
     } catch (error) {
         console.warn('[CHAT] Failed to load favorites from server, using localStorage', error);
-        const raw = localStorage.getItem(FAVORITES_STORAGE_KEY);
-        chatState.favorites = raw ? JSON.parse(raw) : [];
+        chatState.favorites = readLocalFavorites();
     }
 
     const savedSearch = localStorage.getItem(MODEL_SEARCH_STORAGE_KEY);
@@ -230,186 +420,704 @@ async function loadFavorites() {
             els.modelSearchInput.value = savedSearch;
         }
     }
+    const savedProviderFilter = localStorage.getItem(PROVIDER_FILTER_STORAGE_KEY);
+    if (typeof savedProviderFilter === 'string' && savedProviderFilter) {
+        chatState.providerFilter = savedProviderFilter;
+    }
 }
 
 async function saveFavorites() {
-    // Save to localStorage immediately for UI responsiveness
     localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(chatState.favorites || []));
-    
-    // Persist to server for cross-browser/device sync
-    try {
-        await fetchJson('/chat/sessions/favorites', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ models: chatState.favorites || [] }),
-        });
-    } catch (error) {
-        console.warn('[CHAT] Failed to persist favorites to server', error);
+    const { response, data } = await fetchJson('/chat/sessions/favorites', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ models: chatState.favorites || [] }),
+    });
+    if (!response.ok || data?.ok !== true) {
+        throw new Error(getApiErrorMessage(response, data, 'Could not save favorite models'));
     }
 }
 
-async function toggleFavorite(modelId) {
-    if (!modelId) return;
+function normalizeFavoriteKeys() {
+    const normalized = new Set();
+    (chatState.favorites || []).forEach((favorite) => {
+        const exact = chatState.models.find((model) => providerQualifiedValue(model) === favorite);
+        if (exact) {
+            normalized.add(providerQualifiedValue(exact));
+            return;
+        }
+        const matches = chatState.models.filter((model) => model.id === favorite);
+        normalized.add(matches.length === 1 ? providerQualifiedValue(matches[0]) : favorite);
+    });
+    chatState.favorites = Array.from(normalized);
+    localStorage.setItem(FAVORITES_STORAGE_KEY, JSON.stringify(chatState.favorites));
+}
+
+async function toggleFavorite(modelKey) {
+    if (!modelKey) return;
+    const previous = [...chatState.favorites];
     const set = new Set(chatState.favorites || []);
-    if (set.has(modelId)) {
-        set.delete(modelId);
+    if (set.has(modelKey)) {
+        set.delete(modelKey);
     } else {
-        set.add(modelId);
+        set.add(modelKey);
     }
     chatState.favorites = Array.from(set);
-    await saveFavorites();
     populateModelSelect();
     renderModelList();
-    ensureAllowedModel();
+    try {
+        await saveFavorites();
+    } catch (error) {
+        chatState.favorites = previous;
+        populateModelSelect();
+        renderModelList();
+        showChatAlert(getChatErrorMessage(error, 'Could not save favorites'), 'error');
+    }
 }
 
 function getAllowedModels() {
-    const favorites = new Set(chatState.favorites || []);
-    if (favorites.size > 0) {
-        const allowed = chatState.models.filter((m) => favorites.has(m.id));
-        if (allowed.length > 0) return allowed;
-    }
     return chatState.models;
 }
 
 function ensureAllowedModel() {
     const allowed = getAllowedModels();
-    if (!allowed.length) return;
-    if (!chatState.session) return;
-    if (!allowed.find((m) => m.id === chatState.session.model)) {
-        chatState.session.model = allowed[0].id;
-        persistSessionMeta();
-        populateModelSelect();
+    if (!allowed.length) {
+        chatState.selectedModelKey = '';
+        return null;
     }
+    const sessionMatch = allowed.find((model) => (
+        model.id === chatState.session?.model
+        && model.provider === chatState.session?.provider
+    ));
+    const selected = allowed.find((model) => providerQualifiedValue(model) === chatState.selectedModelKey);
+    const favorites = new Set(chatState.favorites || []);
+    const next = sessionMatch || selected || allowed.find((model) => favorites.has(providerQualifiedValue(model))) || allowed[0];
+    chatState.selectedModelKey = providerQualifiedValue(next);
+    return next;
 }
 
 function populateModelSelect() {
-    const { modelSelect } = getChatElements();
+    const {
+        modelSelect,
+        selectedModelLabel,
+        selectedModelProvider,
+        modelCapabilities,
+    } = getChatElements();
     if (!modelSelect) return;
-
-    modelSelect.innerHTML = '';
-    const favoritesSet = new Set(chatState.favorites || []);
-    const allowed = getAllowedModels();
-    const favorites = chatState.models.filter((m) => favoritesSet.has(m.id));
-    const others = chatState.models.filter((m) => !favoritesSet.has(m.id));
-
-    if (favorites.length > 0) {
-        const favGroup = document.createElement('optgroup');
-        favGroup.label = '★ Favorites';
-        favorites.forEach((model) => {
-            const option = document.createElement('option');
-            option.value = model.id;
-            option.textContent = formatModelLabel(model);
-            favGroup.appendChild(option);
-        });
-        modelSelect.appendChild(favGroup);
-
-        if (others.length > 0) {
-            const otherGroup = document.createElement('optgroup');
-            otherGroup.label = 'All models (enable in favorites to use)';
-            others.forEach((model) => {
-                const option = document.createElement('option');
-                option.value = model.id;
-                option.textContent = formatModelLabel(model);
-                option.disabled = true; // visible but cannot be selected
-                otherGroup.appendChild(option);
-            });
-            modelSelect.appendChild(otherGroup);
-        }
-    } else {
-        allowed.forEach((model) => {
-            const option = document.createElement('option');
-            option.value = model.id;
-            option.textContent = formatModelLabel(model);
-            modelSelect.appendChild(option);
-        });
+    const selected = ensureAllowedModel();
+    modelSelect.value = selected ? providerQualifiedValue(selected) : '';
+    if (selectedModelLabel) selectedModelLabel.textContent = selected?.label || 'Choose a model';
+    if (selectedModelProvider) {
+        selectedModelProvider.textContent = selected
+            ? `${selected.providerLabel} · ${selected.id}`
+            : 'No provider models available';
     }
-
-    const targetModel = chatState.session?.model;
-    if (targetModel && allowed.find((m) => m.id === targetModel)) {
-        modelSelect.value = targetModel;
-    } else if (allowed[0]) {
-        modelSelect.value = allowed[0].id;
-        if (chatState.session) {
-            chatState.session.model = allowed[0].id;
-            persistSessionMeta();
-        }
+    if (modelCapabilities) {
+        const capabilities = selected?.capabilities || [];
+        const modalities = selected?.inputModalities || [];
+        const parts = [...new Set([...capabilities, ...modalities])];
+        modelCapabilities.textContent = parts.length
+            ? `Capabilities: ${parts.join(', ')}`
+            : 'No capability metadata published';
     }
 }
 
+function getProviderCatalog() {
+    const providers = new Map();
+    chatState.models.forEach((model) => {
+        const current = providers.get(model.provider) || {
+            id: model.provider,
+            label: model.providerLabel || model.provider,
+            count: 0,
+        };
+        current.count += 1;
+        providers.set(model.provider, current);
+    });
+    return Array.from(providers.values()).sort((left, right) => (
+        left.label.localeCompare(right.label)
+    ));
+}
+
+function renderProviderFilter() {
+    const { providerFilterSelect } = getChatElements();
+    if (!providerFilterSelect) return;
+    const providers = getProviderCatalog();
+    const available = new Set(providers.map((provider) => provider.id));
+    if (chatState.providerFilter !== 'all' && !available.has(chatState.providerFilter)) {
+        chatState.providerFilter = 'all';
+        localStorage.setItem(PROVIDER_FILTER_STORAGE_KEY, chatState.providerFilter);
+    }
+
+    providerFilterSelect.innerHTML = '';
+    const allOption = document.createElement('option');
+    allOption.value = 'all';
+    allOption.textContent = `All providers (${chatState.models.length})`;
+    providerFilterSelect.appendChild(allOption);
+    providers.forEach((provider) => {
+        const option = document.createElement('option');
+        option.value = provider.id;
+        option.textContent = `${provider.label} (${provider.count})`;
+        providerFilterSelect.appendChild(option);
+    });
+    providerFilterSelect.value = chatState.providerFilter;
+    providerFilterSelect.disabled = providers.length === 0;
+}
+
+function setBrowsingProviderFilter(providerId, { persist = true } = {}) {
+    const available = new Set(chatState.models.map((model) => model.provider));
+    chatState.providerFilter = providerId === 'all' || available.has(providerId)
+        ? providerId
+        : 'all';
+    if (persist) {
+        localStorage.setItem(PROVIDER_FILTER_STORAGE_KEY, chatState.providerFilter);
+    }
+    renderProviderFilter();
+    renderModelList();
+}
+
+function handleProviderFilterChange(event) {
+    setBrowsingProviderFilter(event?.target?.value || 'all');
+    setModelPanelOpen(true);
+}
+
+function syncProviderFilterToSelectedModel(model = null) {
+    const selected = model || chatState.models.find(
+        (candidate) => providerQualifiedValue(candidate) === chatState.selectedModelKey,
+    );
+    if (!selected) {
+        renderProviderFilter();
+        return;
+    }
+    setBrowsingProviderFilter(selected.provider);
+}
+
 function renderModelList() {
-    const { modelList, modelListItems, modelSearchInput } = getChatElements();
+    const {
+        modelList,
+        modelListItems,
+        modelSearchInput,
+        modelListStatus,
+        modelFilterButtons,
+    } = getChatElements();
     if (!modelList || !modelListItems) return;
     if (!chatState.modelPanelOpen) {
         modelList.classList.add('hidden');
-        modelListItems.innerHTML = '';
         return;
     }
     modelList.classList.remove('hidden');
     modelListItems.innerHTML = '';
 
     const favorites = new Set(chatState.favorites || []);
-    const query = (chatState.modelSearch || '').toLowerCase();
+    const query = (chatState.modelSearch || '').trim().toLowerCase();
 
     const models = chatState.models.filter((model) => {
+        if (
+            chatState.providerFilter !== 'all'
+            && model.provider !== chatState.providerFilter
+        ) return false;
+        const key = providerQualifiedValue(model);
+        if (chatState.modelFilter === 'favorites' && !favorites.has(key)) return false;
+        if (chatState.modelFilter === 'free' && model.free !== true) return false;
         if (!query) return true;
-        const haystack = `${model.id.toLowerCase()} ${(model.label || '').toLowerCase()} ${inferProvider(model.id).toLowerCase()}`;
+        const haystack = [
+            model.id,
+            model.label,
+            model.provider,
+            model.providerLabel,
+            ...(model.capabilities || []),
+            ...(model.inputModalities || []),
+        ].join(' ').toLowerCase();
         return haystack.includes(query);
     });
 
+    const groups = new Map();
     models.forEach((model) => {
-        const row = document.createElement('div');
-        row.className = 'model-row';
-
-        const star = document.createElement('button');
-        star.type = 'button';
-        star.className = `model-star ${favorites.has(model.id) ? 'active' : ''}`;
-        star.title = favorites.has(model.id) ? 'Unfavorite' : 'Favorite';
-        star.textContent = '★';
-        star.addEventListener('click', () => toggleFavorite(model.id));
-
-        const label = document.createElement('div');
-        label.className = 'model-label';
-        label.textContent = formatModelLabel(model);
-
-        const sub = document.createElement('div');
-        sub.className = 'model-sub';
-        sub.textContent = model.id;
-
-        const provider = document.createElement('div');
-        provider.className = 'model-provider';
-        provider.textContent = inferProvider(model.id);
-
-        row.appendChild(star);
-        const textWrap = document.createElement('div');
-        textWrap.className = 'model-text';
-        textWrap.appendChild(label);
-        textWrap.appendChild(sub);
-        textWrap.appendChild(provider);
-        row.appendChild(textWrap);
-
-        modelListItems.appendChild(row);
+        const group = groups.get(model.provider) || {
+            label: model.providerLabel || model.provider,
+            models: [],
+        };
+        group.models.push(model);
+        groups.set(model.provider, group);
     });
+
+    groups.forEach((group, providerId) => {
+        const section = document.createElement('section');
+        section.className = 'model-provider-group';
+        section.dataset.provider = providerId;
+        const heading = document.createElement('div');
+        heading.className = 'model-provider-heading';
+        const providerName = document.createElement('span');
+        providerName.textContent = group.label;
+        const count = document.createElement('span');
+        count.textContent = String(group.models.length);
+        heading.append(providerName, count);
+        section.appendChild(heading);
+
+        group.models.forEach((model) => {
+            const key = providerQualifiedValue(model);
+            const row = document.createElement('div');
+            row.className = 'model-row';
+            row.dataset.modelKey = key;
+
+            const choice = document.createElement('button');
+            choice.type = 'button';
+            choice.className = 'model-choice';
+            if (key === chatState.selectedModelKey) {
+                choice.setAttribute('aria-current', 'true');
+            }
+            const label = document.createElement('strong');
+            label.className = 'model-label';
+            label.textContent = model.label || model.id;
+            const sub = document.createElement('span');
+            sub.className = 'model-sub';
+            sub.textContent = model.id;
+            const meta = document.createElement('span');
+            meta.className = 'model-meta';
+            modelBadges(model).forEach((badge) => {
+                const node = document.createElement('span');
+                node.className = `model-badge ${badge.className}`.trim();
+                node.textContent = badge.label;
+                meta.appendChild(node);
+            });
+            choice.append(label, sub, meta);
+            choice.addEventListener('click', () => selectModel(model));
+
+            const star = document.createElement('button');
+            star.type = 'button';
+            star.className = `model-star ${favorites.has(key) ? 'active' : ''}`;
+            star.setAttribute('aria-pressed', String(favorites.has(key)));
+            star.setAttribute('aria-label', favorites.has(key) ? 'Remove favorite' : 'Add favorite');
+            star.title = favorites.has(key) ? 'Remove favorite' : 'Add favorite';
+            star.textContent = '★';
+            star.addEventListener('click', () => toggleFavorite(key));
+
+            row.append(choice, star);
+            section.appendChild(row);
+        });
+        modelListItems.appendChild(section);
+    });
+
+    if (!models.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = chatState.models.length
+            ? 'No models match this search and filter.'
+            : 'No provider models are configured.';
+        modelListItems.appendChild(empty);
+    }
 
     if (modelSearchInput && modelSearchInput.value !== chatState.modelSearch) {
         modelSearchInput.value = chatState.modelSearch;
     }
+    modelFilterButtons.forEach((button) => {
+        const active = button.dataset.modelFilter === chatState.modelFilter;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-pressed', String(active));
+    });
+    if (modelListStatus) {
+        const providerTotal = chatState.providerFilter === 'all'
+            ? chatState.models.length
+            : chatState.models.filter(
+                (model) => model.provider === chatState.providerFilter,
+            ).length;
+        modelListStatus.textContent = `${models.length} of ${providerTotal} models in this provider view. Free includes zero-price, rate-limited, and local models.`;
+    }
 }
 
-function inferProvider(modelId) {
-    const id = (modelId || '').toLowerCase();
-    if (id.includes('minimax') || id.startsWith('m2')) return 'MiniMax';
-    if (id.startsWith('gemini') || id.includes('google')) return 'Google / Gemini';
-    if (id.startsWith('claude') || id.includes('anthropic')) return 'Anthropic';
-    if (id.startsWith('openrouter') || id.startsWith('router') || id.includes('/')) return 'OpenRouter';
-    if (id.startsWith('gpt') || id.includes('openai')) return 'OpenAI';
-    return 'Model';
+function providerQualifiedValue(model) {
+    return model.key || `${model.provider}:${model.id}`;
 }
 
-function formatModelLabel(model) {
-    const provider = inferProvider(model.id);
-    const label = model.label || model.id;
-    return `${provider}: ${label}`;
+function modelBadges(model) {
+    const badges = [];
+    const billingBadges = {
+        free: { label: 'Free model', className: 'free-zero' },
+        free_rate_limited: { label: 'Free tier', className: 'free-tier' },
+        local: { label: 'Local', className: 'local' },
+        trial_credit: { label: 'Trial credit', className: '' },
+    };
+    if (billingBadges[model.billing]) badges.push(billingBadges[model.billing]);
+    if (model.contextWindow) badges.push({ label: `${Number(model.contextWindow).toLocaleString()} ctx`, className: '' });
+    (model.capabilities || []).slice(0, 3).forEach((capability) => {
+        badges.push({ label: String(capability), className: '' });
+    });
+    return badges;
+}
+
+function setModelPanelOpen(open, { restoreFocus = true } = {}) {
+    const wasOpen = chatState.modelPanelOpen;
+    chatState.modelPanelOpen = Boolean(open);
+    const { modelTrigger, modelSearchInput } = getChatElements();
+    modelTrigger?.setAttribute('aria-expanded', String(chatState.modelPanelOpen));
+    renderModelList();
+    if (chatState.modelPanelOpen) {
+        requestAnimationFrame(() => modelSearchInput?.focus());
+    } else if (wasOpen && restoreFocus) {
+        requestAnimationFrame(() => modelTrigger?.focus());
+    }
+}
+
+async function selectModel(model) {
+    const previousKey = chatState.selectedModelKey;
+    const previousProviderFilter = chatState.providerFilter;
+    chatState.selectedModelKey = providerQualifiedValue(model);
+    syncProviderFilterToSelectedModel(model);
+    populateModelSelect();
+    renderModelList();
+    setModelPanelOpen(false);
+    if (!chatState.sessionId) return;
+    try {
+        await updateSession({ provider: model.provider, model: model.id });
+    } catch (error) {
+        chatState.selectedModelKey = previousKey;
+        chatState.providerFilter = previousProviderFilter;
+        localStorage.setItem(PROVIDER_FILTER_STORAGE_KEY, chatState.providerFilter);
+        renderProviderFilter();
+        populateModelSelect();
+        renderModelList();
+        showChatAlert(getChatErrorMessage(error, 'Could not change model'), 'error');
+    }
+}
+
+async function loadChatSettings() {
+    const { response, data } = await fetchJson('/chat/sessions/settings');
+    if (!response.ok || !data?.settings) {
+        showChatAlert(getApiErrorMessage(response, data, 'Could not load chat defaults'), 'error');
+        return;
+    }
+    chatState.chatSettings = { ...chatState.chatSettings, ...data.settings };
+}
+
+function applyAgentSettingsToControls() {
+    const els = getChatElements();
+    const settings = chatState.chatSettings;
+    if (els.temperatureInput) {
+        els.temperatureInput.value = settings.temperature ?? '';
+    }
+    if (els.maxOutputInput) {
+        els.maxOutputInput.value = settings.maxOutputTokens ?? '';
+    }
+    if (els.maxToolRoundsInput) {
+        els.maxToolRoundsInput.value = settings.maxToolRounds ?? 8;
+    }
+    if (els.includeReasoningInput) {
+        els.includeReasoningInput.checked = settings.includeReasoning !== false;
+    }
+    if (els.reasoningEffortSelect) {
+        els.reasoningEffortSelect.value = settings.reasoningEffort || '';
+    }
+    if (els.includeManagementTools) {
+        els.includeManagementTools.checked = chatState.session
+            ? chatState.session.includeManagementTools === true
+            : settings.includeManagementTools === true;
+    }
+    updateReasoningControls();
+}
+
+function updateReasoningControls() {
+    const { includeReasoningInput, reasoningEffortSelect } = getChatElements();
+    if (reasoningEffortSelect) {
+        reasoningEffortSelect.disabled = includeReasoningInput?.checked === false;
+    }
+}
+
+async function loadChatServers() {
+    chatState.serverCatalogLoaded = false;
+    chatState.serverCatalogError = '';
+    const { response, data } = await fetchJson('/_meta/servers');
+    if (!response.ok || data?.ok !== true || !Array.isArray(data?.servers)) {
+        chatState.servers = [];
+        chatState.serverAllowlist = [];
+        chatState.serverCatalogError = getApiErrorMessage(
+            response,
+            data,
+            'Server catalog could not be loaded',
+        );
+        showChatAlert(
+            `${chatState.serverCatalogError}. New sessions will start with no MCP servers.`,
+            'error',
+        );
+        renderChatServerList();
+        return false;
+    }
+    chatState.serverCatalogLoaded = true;
+    chatState.servers = data.servers
+        .filter((server) => server && server.name).map((server) => ({
+            ...server,
+            name: String(server.name),
+        }));
+    if (!chatState.session && !chatState.serverSelectionExplicit) {
+        chatState.serverAllowlist = null;
+    }
+    return true;
+}
+
+function renderChatServerList() {
+    const { serverList, allServers, toolCount } = getChatElements();
+    if (toolCount) {
+        toolCount.textContent = String(chatState.session?.tools?.length || 0);
+    }
+    if (!serverList) return;
+    serverList.innerHTML = '';
+    const enabledServers = chatState.servers.filter((server) => server.enabled !== false);
+    if (allServers) {
+        allServers.checked = chatState.serverCatalogLoaded && chatState.serverAllowlist === null;
+        allServers.disabled = !chatState.serverCatalogLoaded;
+    }
+    if (!chatState.serverCatalogLoaded) {
+        const unavailable = document.createElement('div');
+        unavailable.className = 'empty-state';
+        unavailable.textContent = 'Server catalog unavailable. Tool access is locked to none.';
+        serverList.appendChild(unavailable);
+        return;
+    }
+    if (!enabledServers.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty-state';
+        empty.textContent = 'No enabled MCP servers';
+        serverList.appendChild(empty);
+        return;
+    }
+    const allowed = new Set(chatState.serverAllowlist || []);
+    enabledServers.forEach((server) => {
+        const row = document.createElement('label');
+        row.className = 'chat-server-option';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = chatState.serverAllowlist === null || allowed.has(server.name);
+        const name = document.createElement('span');
+        name.textContent = server.name;
+        row.append(checkbox, name);
+        checkbox.addEventListener('change', async () => {
+            const previous = chatState.serverAllowlist === null
+                ? null
+                : [...chatState.serverAllowlist];
+            const next = new Set(
+                chatState.serverAllowlist === null
+                    ? enabledServers.map((item) => item.name)
+                    : chatState.serverAllowlist,
+            );
+            if (checkbox.checked) next.add(server.name);
+            else next.delete(server.name);
+            chatState.serverSelectionExplicit = true;
+            chatState.serverAllowlist = Array.from(next);
+            renderChatServerList();
+            if (!chatState.sessionId) return;
+            try {
+                await updateSession({
+                    server_allowlist: chatState.serverAllowlist,
+                    refresh_tools: true,
+                });
+            } catch (error) {
+                chatState.serverAllowlist = previous;
+                renderChatServerList();
+                showChatAlert(getChatErrorMessage(error, 'Could not update tool access'), 'error');
+            }
+        });
+        serverList.appendChild(row);
+    });
+}
+
+function getSelectedModel() {
+    return chatState.models.find(
+        (model) => providerQualifiedValue(model) === chatState.selectedModelKey,
+    ) || null;
+}
+
+function inferAttachmentType(file) {
+    const extension = (file.name.match(/\.[^.]+$/)?.[0] || '').toLowerCase();
+    const fallbackMime = {
+        '.md': 'text/markdown',
+        '.txt': 'text/plain',
+        '.csv': 'text/csv',
+        '.log': 'text/plain',
+        '.py': 'text/x-python',
+        '.js': 'application/javascript',
+        '.ts': 'text/typescript',
+        '.yaml': 'application/yaml',
+        '.yml': 'application/yaml',
+        '.json': 'application/json',
+        '.xml': 'application/xml',
+        '.pdf': 'application/pdf',
+    }[extension];
+    const declaredMime = (file.type || '').toLowerCase();
+    const declaredSupported = IMAGE_MIME_TYPES.has(declaredMime)
+        || declaredMime === 'application/pdf'
+        || declaredMime.startsWith('text/')
+        || TEXT_MIME_TYPES.has(declaredMime);
+    const mimeType = declaredSupported ? declaredMime : (fallbackMime || declaredMime);
+    if (IMAGE_MIME_TYPES.has(mimeType)) return { type: 'image', mimeType };
+    if (mimeType === 'application/pdf') return { type: 'file', mimeType };
+    if (mimeType.startsWith('text/') || TEXT_MIME_TYPES.has(mimeType)) {
+        return { type: 'text', mimeType };
+    }
+    return null;
+}
+
+function arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+    }
+    return btoa(binary);
+}
+
+async function addAttachments(fileList) {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    const errors = [];
+    let totalBytes = chatState.attachments.reduce((sum, attachment) => sum + attachment.sizeBytes, 0);
+    for (const file of files) {
+        if (chatState.attachments.length >= MAX_CHAT_ATTACHMENTS) {
+            errors.push(`Only ${MAX_CHAT_ATTACHMENTS} attachments are allowed.`);
+            break;
+        }
+        const classification = inferAttachmentType(file);
+        if (!classification) {
+            errors.push(`${file.name}: unsupported file type.`);
+            continue;
+        }
+        if (file.size > MAX_CHAT_ATTACHMENT_BYTES) {
+            errors.push(`${file.name}: exceeds 5 MiB.`);
+            continue;
+        }
+        if (totalBytes + file.size > MAX_CHAT_ATTACHMENT_TOTAL_BYTES) {
+            errors.push(`${file.name}: attachments would exceed 20 MiB total.`);
+            continue;
+        }
+        try {
+            const buffer = await file.arrayBuffer();
+            if (classification.type === 'text') {
+                new TextDecoder('utf-8', { fatal: true }).decode(buffer);
+            }
+            const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+            chatState.attachments.push({
+                id,
+                type: classification.type,
+                name: file.name,
+                mimeType: classification.mimeType,
+                sizeBytes: file.size,
+                data: arrayBufferToBase64(buffer),
+                previewUrl: classification.type === 'image' ? URL.createObjectURL(file) : '',
+            });
+            totalBytes += file.size;
+        } catch (error) {
+            errors.push(`${file.name}: ${classification.type === 'text' ? 'not valid UTF-8' : 'could not be read'}.`);
+        }
+    }
+    renderAttachmentPreview();
+    if (errors.length) showChatAlert(errors.join(' '), 'error');
+}
+
+function removeAttachment(attachmentId) {
+    const index = chatState.attachments.findIndex((attachment) => attachment.id === attachmentId);
+    if (index < 0) return;
+    const [removed] = chatState.attachments.splice(index, 1);
+    if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+    renderAttachmentPreview();
+}
+
+function clearAttachments() {
+    chatState.attachments.forEach((attachment) => {
+        if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+    });
+    chatState.attachments = [];
+    renderAttachmentPreview();
+}
+
+function renderAttachmentPreview() {
+    const { attachmentPreview } = getChatElements();
+    if (!attachmentPreview) return;
+    attachmentPreview.innerHTML = '';
+    chatState.attachments.forEach((attachment) => {
+        const chip = document.createElement('div');
+        chip.className = 'chat-attachment-chip';
+        if (attachment.previewUrl) {
+            const image = document.createElement('img');
+            image.className = 'chat-attachment-thumb';
+            image.src = attachment.previewUrl;
+            image.alt = '';
+            chip.appendChild(image);
+        } else {
+            const icon = document.createElement('span');
+            icon.className = 'chat-attachment-icon';
+            icon.textContent = attachment.type === 'file' ? 'PDF' : 'TXT';
+            chip.appendChild(icon);
+        }
+        const copy = document.createElement('span');
+        copy.className = 'chat-attachment-copy';
+        const name = document.createElement('strong');
+        name.textContent = attachment.name;
+        const size = document.createElement('span');
+        size.textContent = formatChatBytes(attachment.sizeBytes);
+        copy.append(name, size);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'chat-attachment-remove';
+        remove.setAttribute('aria-label', `Remove ${attachment.name}`);
+        remove.textContent = '×';
+        remove.addEventListener('click', () => removeAttachment(attachment.id));
+        chip.append(copy, remove);
+        attachmentPreview.appendChild(chip);
+    });
+}
+
+function formatChatBytes(size) {
+    if (size < 1024) return `${size} B`;
+    if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KiB`;
+    return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function validateAttachmentSupport() {
+    const model = getSelectedModel();
+    if (!model || !chatState.attachments.length) return;
+    const modalities = new Set((model.inputModalities || ['text']).map((item) => String(item).toLowerCase()));
+    if (chatState.attachments.some((attachment) => attachment.type === 'image') && !modalities.has('image')) {
+        throw new Error(`${model.label} does not advertise image input support.`);
+    }
+    if (chatState.attachments.some((attachment) => attachment.type === 'file') && !modalities.has('file')) {
+        throw new Error(`${model.label} does not advertise PDF/file input support.`);
+    }
+}
+
+function autoSizeComposer(textarea) {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.min(Math.max(textarea.scrollHeight, 44), 180)}px`;
+}
+
+function optionalNumber(input, integer = false) {
+    const raw = input?.value?.trim();
+    if (!raw) return null;
+    const value = integer ? Number.parseInt(raw, 10) : Number.parseFloat(raw);
+    return Number.isFinite(value) ? value : null;
+}
+
+async function authenticatedFetch(path, options = {}) {
+    const headers = new Headers(options.headers || {});
+    const apiKey = localStorage.getItem('mcpo-api-key');
+    if (apiKey && !headers.has('Authorization')) {
+        headers.set('Authorization', `Bearer ${apiKey}`);
+    }
+    return fetch(path, { ...options, headers });
+}
+
+async function responseErrorMessage(response, fallback) {
+    try {
+        const data = await response.json();
+        return getApiErrorMessage(response, data, fallback);
+    } catch {
+        return response.status ? `${fallback} (HTTP ${response.status})` : fallback;
+    }
+}
+
+function getChatErrorMessage(error, fallback = 'Request failed') {
+    if (typeof error === 'string' && error) return error;
+    if (error && typeof error.message === 'string' && error.message) return error.message;
+    if (error && typeof error.detail === 'string' && error.detail) return error.detail;
+    return fallback;
 }
 
 async function ensureSession() {
@@ -418,106 +1126,94 @@ async function ensureSession() {
         const session = await fetchSession(storedId);
         if (session) {
             chatState.sessionId = storedId;
-            // Preserve locally-selected model if user changed it before sending
-            const localModel = chatState.session?.model;
             chatState.session = session;
             chatState.selectedSkillIds = Array.isArray(session.skillIds) ? session.skillIds.slice() : [];
-            if (localModel && localModel !== session.model) {
-                // User changed model locally - preserve that choice
-                chatState.session.model = localModel;
+            if (chatState.serverCatalogLoaded) {
+                chatState.serverAllowlist = Array.isArray(session.serverAllowlist)
+                    ? session.serverAllowlist.slice()
+                    : null;
+                chatState.serverSelectionExplicit = Array.isArray(session.serverAllowlist);
+            } else {
+                chatState.serverAllowlist = [];
+                chatState.serverSelectionExplicit = true;
             }
-            persistSessionMeta();
+            chatState.selectedModelKey = session.provider && session.model
+                ? `${session.provider}:${session.model}`
+                : chatState.selectedModelKey;
+            if (!chatState.serverCatalogLoaded) {
+                try {
+                    await updateSession({ server_allowlist: [], refresh_tools: true });
+                } catch (error) {
+                    chatState.sessionId = null;
+                    chatState.session = null;
+                    showChatAlert(
+                        getChatErrorMessage(
+                            error,
+                            'Existing session tool access could not be locked while the server catalog is unavailable',
+                        ),
+                        'error',
+                    );
+                }
+                return;
+            }
+            populateModelSelect();
+            renderSkillList();
+            renderChatServerList();
             return;
         }
+        localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
     }
     await createSession();
 }
 
 async function createSession() {
-    const allowed = getAllowedModels();
-    const defaultModel = allowed?.[0]?.id;
-    if (!defaultModel) {
-        throw new Error('No OpenRouter models available');
+    const selectedModel = ensureAllowedModel();
+    if (!selectedModel) {
+        showChatAlert('No models are available. Configure and test a provider in Settings.', 'error');
+        return;
     }
     try {
         const payload = {
-            model: defaultModel,
-            skill_ids: getSelectedSkillIds(),
-            system_prompt: `You are HubUI Assistant, an embedded AI agent in OpenHubUI—a companion app for Open WebUI.
-
-## Your Purpose
-OpenHubUI solves a critical limitation: Open WebUI only supports MCP via Streamable HTTP, but most MCP servers use stdio or SSE transports. OpenHubUI proxies ANY MCP server (stdio, SSE, or HTTP) into a single aggregated Streamable HTTP endpoint that Open WebUI can consume.
-
-Additionally, OpenAPI tool integrations don't work as reliably as native MCP—OpenHubUI provides native MCP protocol support for better tool execution.
-
-## Your Role
-Help users:
-1. Add and configure MCP servers in OpenHubUI
-2. Connect the aggregated MCP endpoint to Open WebUI
-3. Troubleshoot connection and configuration issues
-
-## Tool Usage Guidelines
-When calling MCP tools:
-- **Always provide ALL required parameters** - check the tool schema carefully
-- **For timezone parameters**: Use IANA timezone format (e.g., "Europe/Paris", "America/New_York", "Asia/Tokyo")
-- **Infer values from context**: If user says "Paris", use "Europe/Paris"; "New York" → "America/New_York"; "Tokyo" → "Asia/Tokyo"
-- If a required parameter is ambiguous, ask the user for clarification before calling the tool
-
-## Management Tools (Direct Access)
-- mcpo.get_config / mcpo.post_config — Read and update MCP server configuration
-- mcpo.get_requirements / mcpo.post_requirements — Manage Python dependencies  
-- mcpo.install_python_package — Install packages needed by MCP servers
-- mcpo.get_logs — View server logs for debugging
-
-## How to Connect OpenHubUI to Open WebUI
-The proxy on port 8001 exposes MCP servers in two ways:
-
-**Option A: Single Aggregated Connection (Recommended)**
-- URL: http://host.docker.internal:8001 (Docker) or http://localhost:8001 (local)
-- All MCP servers appear as one connection in Open WebUI
-- Tools from all servers available together
-
-**Option B: Per-Server Connections**
-- URL: http://host.docker.internal:8001/{server-name}
-- Example: http://host.docker.internal:8001/perplexity
-- Each server gets its own toggle in Open WebUI's External Tools
-- Useful if user wants to enable/disable specific servers in Open WebUI
-
-**Steps to add in Open WebUI:**
-1. Go to ⚙️ Admin Settings → External Tools
-2. Click + (Add Server)
-3. Set Type to "MCP (Streamable HTTP)"
-4. Enter the URL (aggregate or per-server)
-5. Auth: None (unless API key configured)
-6. Save
-
-## Guidelines
-- Always read current config (mcpo.get_config) before making changes
-- Explain what you're doing and why
-- After config changes, remind users to check the Configuration → Client Configuration tab for the connection JSON
-- Be concise and action-oriented
-
-The user is viewing the OpenHubUI admin interface.`,
+            provider: selectedModel.provider,
+            model: selectedModel.id,
+            system_prompt: chatState.chatSettings.defaultSystemPrompt || null,
         };
+        payload.server_allowlist = chatState.serverCatalogLoaded
+            ? chatState.serverAllowlist
+            : [];
+        payload.include_management_tools = Boolean(
+            getChatElements().includeManagementTools?.checked,
+        );
+        if (chatState.skillSelectionExplicit) {
+            payload.skill_ids = getSelectedSkillIds();
+        }
         const { response, data } = await fetchJson('/chat/sessions', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        if (!response.ok || !data.session) {
-            throw new Error(data?.error || 'Failed to create session');
+        if (!response.ok || !data?.session) {
+            throw new Error(getApiErrorMessage(response, data, 'Failed to create session'));
         }
         chatState.sessionId = data.session.id;
         chatState.session = data.session;
         chatState.selectedSkillIds = Array.isArray(data.session.skillIds) ? data.session.skillIds.slice() : [];
+        chatState.serverAllowlist = Array.isArray(data.session.serverAllowlist)
+            ? data.session.serverAllowlist.slice()
+            : chatState.serverAllowlist;
+        chatState.selectedModelKey = `${data.session.provider}:${data.session.model}`;
         chatState.stepMessages = {};
         chatState.currentStepId = null;
         localStorage.setItem(CHAT_SESSION_STORAGE_KEY, chatState.sessionId);
         populateModelSelect();
-        persistSessionMeta();
+        renderSkillList();
+        renderChatServerList();
+        renderSession();
     } catch (error) {
         console.error('[CHAT] createSession failed', error);
-        showChatAlert('Session creation failed', 'error');
+        chatState.sessionId = null;
+        chatState.session = null;
+        showChatAlert(getChatErrorMessage(error, 'Session creation failed'), 'error');
     }
 }
 
@@ -539,27 +1235,70 @@ async function resetSession() {
         const { response, data } = await fetchJson(`/chat/sessions/${chatState.sessionId}/reset`, {
             method: 'POST',
         });
-        if (!response.ok || !data.session) {
-            throw new Error('Failed to reset session');
+        if (!response.ok || !data?.session) {
+            throw new Error(getApiErrorMessage(response, data, 'Failed to reset session'));
         }
         chatState.session = data.session;
         chatState.selectedSkillIds = Array.isArray(data.session.skillIds) ? data.session.skillIds.slice() : [];
         chatState.stepMessages = {};
         chatState.currentStepId = null;
+        await updateSession({ refresh_tools: true });
         renderSession();
         showChatAlert('Session cleared', 'info');
     } catch (error) {
         console.error('[CHAT] resetSession failed', error);
-        showChatAlert('Failed to reset session', 'error');
+        showChatAlert(getChatErrorMessage(error, 'Failed to reset session'), 'error');
     }
 }
 
-async function persistSessionMeta() {
-    const { modelSelect } = getChatElements();
-    if (modelSelect && chatState.session?.model) {
-        modelSelect.value = chatState.session.model;
+async function startNewSession() {
+    abortStreaming();
+    chatState.sessionId = null;
+    chatState.session = null;
+    chatState.stepMessages = {};
+    chatState.currentStepId = null;
+    chatState.expandedReasoningIds.clear();
+    chatState.expandedToolIds.clear();
+    localStorage.removeItem(CHAT_SESSION_STORAGE_KEY);
+    renderSession();
+    await createSession();
+}
+
+async function updateSession(payload) {
+    if (!chatState.sessionId) return null;
+    const { response, data } = await fetchJson(`/chat/sessions/${chatState.sessionId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload || {}),
+    });
+    if (!response.ok || !data?.session) {
+        throw new Error(getApiErrorMessage(response, data, 'Could not update chat session'));
     }
+    chatState.session = data.session;
+    chatState.selectedSkillIds = Array.isArray(data.session.skillIds)
+        ? data.session.skillIds.slice()
+        : chatState.selectedSkillIds;
+    if (Object.prototype.hasOwnProperty.call(payload, 'server_allowlist')) {
+        chatState.serverAllowlist = Array.isArray(payload.server_allowlist)
+            ? payload.server_allowlist.slice()
+            : null;
+    } else if (Array.isArray(data.session.serverAllowlist)) {
+        chatState.serverAllowlist = data.session.serverAllowlist.slice();
+    }
+    if (data.session.provider && data.session.model) {
+        chatState.selectedModelKey = `${data.session.provider}:${data.session.model}`;
+    }
+    populateModelSelect();
     renderSkillList();
+    renderChatServerList();
+    renderSession();
+    return data.session;
+}
+
+async function persistSessionMeta() {
+    populateModelSelect();
+    renderSkillList();
+    renderChatServerList();
     renderSession();
 }
 
@@ -568,7 +1307,7 @@ async function sendChatMessage() {
     if (!els.textarea || chatState.streaming) return;
 
     const message = (els.textarea.value || '').trim();
-    if (!message) {
+    if (!message && !chatState.attachments.length) {
         return;
     }
 
@@ -578,17 +1317,50 @@ async function sendChatMessage() {
         return;
     }
 
-    const stream = els.streamToggle?.checked !== false;
+    try {
+        validateAttachmentSupport();
+    } catch (error) {
+        showChatAlert(getChatErrorMessage(error), 'error');
+        return;
+    }
 
-    appendUserMessage(message);
+    const stream = els.streamToggle?.checked !== false;
+    const selectedModel = getSelectedModel();
+    if (!selectedModel) {
+        showChatAlert('Choose an available model before sending.', 'error');
+        return;
+    }
+    const attachmentMetadata = chatState.attachments.map((attachment) => ({
+        type: attachment.type,
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        sizeBytes: attachment.sizeBytes,
+    }));
+
+    appendUserMessage(message, attachmentMetadata);
     els.textarea.value = '';
+    autoSizeComposer(els.textarea);
 
     const payload = {
         message,
         stream,
-        model: chatState.session.model,
-        skill_ids: getSelectedSkillIds(),
+        provider: selectedModel.provider,
+        model: selectedModel.id,
+        temperature: optionalNumber(els.temperatureInput),
+        max_output_tokens: optionalNumber(els.maxOutputInput, true),
+        max_tool_rounds: optionalNumber(els.maxToolRoundsInput, true) || 8,
+        include_reasoning: els.includeReasoningInput?.checked !== false,
+        reasoning_effort: els.includeReasoningInput?.checked === false
+            ? null
+            : (els.reasoningEffortSelect?.value || null),
+        attachments: chatState.attachments.map((attachment) => ({
+            type: attachment.type,
+            name: attachment.name,
+            mime_type: attachment.mimeType,
+            data: attachment.data,
+        })),
     };
+    if (chatState.skillSelectionExplicit) payload.skill_ids = getSelectedSkillIds();
 
     if (stream) {
         await sendStreamingMessage(payload);
@@ -604,9 +1376,10 @@ async function sendStandardMessage(payload) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
         });
-        if (!response.ok) {
-            throw new Error(data?.detail || 'Chat request failed');
+        if (!response.ok || !data?.session) {
+            throw new Error(getApiErrorMessage(response, data, 'Chat request failed'));
         }
+        clearAttachments();
         chatState.session = data.session;
         chatState.selectedSkillIds = Array.isArray(data.session.skillIds) ? data.session.skillIds.slice() : [];
         chatState.stepMessages = {};
@@ -614,7 +1387,7 @@ async function sendStandardMessage(payload) {
         renderSession();
     } catch (error) {
         console.error('[CHAT] sendStandardMessage failed', error);
-        showChatAlert(`Chat failed: ${error.message}`, 'error');
+        showChatAlert(`Chat failed: ${getChatErrorMessage(error)}`, 'error');
     }
 }
 
@@ -623,7 +1396,7 @@ async function sendStreamingMessage(payload) {
 
     chatState.streaming = true;
     const els = getChatElements();
-    els.stopBtn.disabled = false;
+    if (els.stopBtn) els.stopBtn.disabled = false;
     toggleFormDisabled(true);
 
     const controller = new AbortController();
@@ -631,16 +1404,20 @@ async function sendStreamingMessage(payload) {
     chatState.buffer = '';
 
     try {
-        const response = await fetch(`/chat/sessions/${chatState.sessionId}/messages`, {
+        const response = await authenticatedFetch(`/chat/sessions/${chatState.sessionId}/messages`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload),
             signal: controller.signal,
         });
 
-        if (!response.ok || !response.body) {
-            throw new Error('Streaming response failed');
+        if (!response.ok) {
+            throw new Error(await responseErrorMessage(response, 'Streaming response failed'));
         }
+        if (!response.body) {
+            throw new Error('Streaming response did not include a readable body');
+        }
+        clearAttachments();
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
@@ -658,7 +1435,7 @@ async function sendStreamingMessage(payload) {
             showChatAlert('Streaming aborted', 'info');
         } else {
             console.error('[CHAT] streaming error', error);
-            showChatAlert(`Streaming error: ${error.message}`, 'error');
+            showChatAlert(`Streaming error: ${getChatErrorMessage(error)}`, 'error');
         }
     } finally {
         finalizeStreaming();
@@ -689,6 +1466,9 @@ async function handleStreamEvent(event) {
     switch (event.type) {
         case 'session.updated':
             chatState.session = event.session;
+            if (event.session?.provider && event.session?.model) {
+                chatState.selectedModelKey = `${event.session.provider}:${event.session.model}`;
+            }
             renderSession();
             break;
         case 'skills.loaded':
@@ -741,10 +1521,10 @@ function displaySkillsLoaded(skills) {
     el.scrollIntoView({ behavior: 'smooth', block: 'end' });
 }
 
-function appendUserMessage(content) {
+function appendUserMessage(content, attachments = []) {
     chatState.session = chatState.session || { messages: [] };
     chatState.session.messages = chatState.session.messages || [];
-    chatState.session.messages.push({ role: 'user', content });
+    chatState.session.messages.push({ role: 'user', content, attachments });
     renderMessages();
 }
 
@@ -889,6 +1669,9 @@ async function refreshSessionState() {
         
         chatState.session = latest;
         chatState.selectedSkillIds = Array.isArray(latest.skillIds) ? latest.skillIds.slice() : [];
+        if (latest.provider && latest.model) {
+            chatState.selectedModelKey = `${latest.provider}:${latest.model}`;
+        }
         renderSession();
     }
 }
@@ -916,19 +1699,23 @@ function toggleFormDisabled(disabled) {
     const els = getChatElements();
     if (els.textarea) els.textarea.disabled = disabled;
     if (els.modelSelect) els.modelSelect.disabled = disabled;
+    if (els.modelTrigger) els.modelTrigger.disabled = disabled;
+    if (els.providerFilterSelect) {
+        els.providerFilterSelect.disabled = disabled || chatState.models.length === 0;
+    }
     if (els.skillToggle) els.skillToggle.disabled = disabled;
     if (els.resetBtn) els.resetBtn.disabled = disabled;
+    if (els.newSessionBtn) els.newSessionBtn.disabled = disabled;
+    if (els.attachmentInput) els.attachmentInput.disabled = disabled;
+    if (els.sendBtn) els.sendBtn.disabled = disabled;
 }
 
 function renderSession() {
     renderMessages();
     renderActiveSkills();
     renderSessionMeta();
-    // Sync model dropdown with session state
-    const { modelSelect } = getChatElements();
-    if (modelSelect && chatState.session?.model) {
-        modelSelect.value = chatState.session.model;
-    }
+    populateModelSelect();
+    renderChatServerList();
 }
 
 function renderMessages() {
@@ -937,6 +1724,7 @@ function renderMessages() {
     messagesContainer.innerHTML = '';
 
     const messages = chatState.session?.messages || [];
+    let renderedCount = 0;
     messages.forEach((message, msgIndex) => {
         const role = message.role || 'assistant';
 
@@ -949,6 +1737,9 @@ function renderMessages() {
         // Create message block container
         const block = document.createElement('div');
         block.className = `chat-message-block chat-message-block--${role}`;
+
+        const attachmentNode = renderMessageAttachments(message.attachments || []);
+        if (attachmentNode) block.appendChild(attachmentNode);
 
         // Generate unique IDs for state tracking
         const reasoningId = `reasoning-${msgIndex}`;
@@ -1011,8 +1802,8 @@ function renderMessages() {
                 toolEl.className = `chat-tool-call ${isError ? 'chat-tool-call--error' : status === 'running' ? 'chat-tool-call--running' : 'chat-tool-call--success'} ${isToolExpanded ? 'expanded' : ''}`;
 
                 // Parse duration if available
-                const duration = call.result?.duration_ms || call.duration_ms;
-                const durationText = duration ? `${duration}ms` : '';
+                const duration = Number(call.result?.duration_ms || call.duration_ms);
+                const durationText = Number.isFinite(duration) && duration >= 0 ? `${duration}ms` : '';
 
                 toolEl.innerHTML = `
                     <div class="chat-tool-call__header">
@@ -1067,12 +1858,12 @@ function renderMessages() {
 
         // 3. Render main message bubble (After tools)
         // Skip content that looks like raw tool result JSON (already shown in tool cards)
-        const content = message.content;
-        const contentStr = typeof content === 'string' ? content.trim() : '';
+        const content = messageTextContent(message.content);
+        const contentStr = content.trim();
         const isToolResultJson = contentStr.startsWith('{') && contentStr.endsWith('}') && 
             (contentStr.includes('"ok":') && contentStr.includes('"output":'));
         
-        if (content && !isToolResultJson) {
+        if (contentStr && !isToolResultJson) {
             const wrapper = document.createElement('div');
             wrapper.className = `chat-message ${role}`;
 
@@ -1085,7 +1876,19 @@ function renderMessages() {
         }
 
         messagesContainer.appendChild(block);
+        renderedCount += 1;
     });
+
+    if (!renderedCount && !chatState.streaming) {
+        const empty = document.createElement('div');
+        empty.className = 'chat-empty-state';
+        const title = document.createElement('strong');
+        title.textContent = 'Start an agentic chat';
+        const copy = document.createElement('span');
+        copy.textContent = 'Choose a provider model, scope its tools and skills, then attach context or send a task.';
+        empty.append(title, copy);
+        messagesContainer.appendChild(empty);
+    }
 
     // Add streaming indicator if currently streaming
     if (chatState.streaming) {
@@ -1105,6 +1908,47 @@ function renderMessages() {
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
 }
 
+function renderMessageAttachments(attachments) {
+    if (!Array.isArray(attachments) || !attachments.length) return null;
+    const container = document.createElement('div');
+    container.className = 'chat-message-attachments chat-attachment-preview';
+    attachments.forEach((attachment) => {
+        const chip = document.createElement('div');
+        chip.className = 'chat-attachment-chip';
+        const icon = document.createElement('span');
+        icon.className = 'chat-attachment-icon';
+        icon.textContent = attachment.type === 'image'
+            ? 'IMG'
+            : attachment.type === 'file' ? 'PDF' : 'TXT';
+        const copy = document.createElement('span');
+        copy.className = 'chat-attachment-copy';
+        const name = document.createElement('strong');
+        name.textContent = attachment.name || 'Attachment';
+        const detail = document.createElement('span');
+        detail.textContent = attachment.sizeBytes
+            ? formatChatBytes(attachment.sizeBytes)
+            : (attachment.mimeType || 'Attached context');
+        copy.append(name, detail);
+        chip.append(icon, copy);
+        container.appendChild(chip);
+    });
+    return container;
+}
+
+function messageTextContent(content) {
+    if (typeof content === 'string') return content;
+    if (Array.isArray(content)) {
+        return content
+            .filter((part) => part && part.type === 'text' && typeof part.text === 'string')
+            .map((part) => part.text)
+            .join('\n');
+    }
+    if (content === null || content === undefined) return '';
+    if (typeof content === 'number' || typeof content === 'boolean') return String(content);
+    if (typeof content.text === 'string') return content.text;
+    return safeJson(content);
+}
+
 function escapeHtml(text) {
     if (!text) return '';
     const div = document.createElement('div');
@@ -1122,7 +1966,7 @@ function stripThinkTags(content) {
 function formatMessageContent(content) {
     if (!content) return '';
     // Strip <think> tags for display (kept in history for thinking continuity)
-    let cleanContent = stripThinkTags(content);
+    let cleanContent = stripThinkTags(messageTextContent(content));
     // Basic markdown-like formatting
     let html = escapeHtml(cleanContent);
     // Code blocks
@@ -1199,91 +2043,6 @@ function formatToolResult(result) {
     }
 }
 
-function renderSteps() {
-    const { stepsContainer } = getChatElements();
-    if (!stepsContainer) return;
-
-    stepsContainer.innerHTML = '';
-    const steps = chatState.session?.steps || [];
-    if (!steps.length) {
-        stepsContainer.innerHTML = '<div class="empty-state">No agent steps yet.</div>';
-        return;
-    }
-
-    steps.forEach((step) => {
-        const card = document.createElement('div');
-        card.className = 'chat-step-card';
-
-        const title = document.createElement('div');
-        title.className = 'chat-step-title';
-        title.textContent = step.title || step.type || 'Step';
-        card.appendChild(title);
-
-        const meta = document.createElement('div');
-        meta.className = 'chat-step-meta';
-        const created = new Date(step.createdAt || Date.now());
-        meta.innerHTML = `<span>${created.toLocaleTimeString()}</span>`;
-        if (step.detail?.finishReason) {
-            meta.innerHTML += `<span>Finish: ${step.detail.finishReason}</span>`;
-        }
-        if (step.detail?.summary) {
-            meta.innerHTML += `<span>Summary: ${step.detail.summary}</span>`;
-        }
-        card.appendChild(meta);
-
-        const toolCalls = step.detail?.toolCalls || [];
-        toolCalls.forEach((call) => {
-            const callNode = document.createElement('div');
-            callNode.className = 'chat-step-tool';
-            const status = call.status ? `status=${call.status}` : '';
-            const args = call.arguments ? safeJson(call.arguments) : '';
-            const result = call.result ? `<br><strong>Result:</strong> ${safeJson(call.result)}` : '';
-            callNode.innerHTML = `<strong>${call.name}</strong> ${status}<br><strong>Args:</strong> ${args}${result}`;
-            card.appendChild(callNode);
-        });
-
-        stepsContainer.appendChild(card);
-    });
-}
-
-function renderToolCatalog() {
-    const { toolsContainer } = getChatElements();
-    if (!toolsContainer) return;
-
-    toolsContainer.innerHTML = '';
-    const entries = Object.entries(chatState.toolCatalog || {});
-    if (!entries.length) {
-        toolsContainer.innerHTML = '<div class="empty-state">No tools available</div>';
-        return;
-    }
-
-    entries.forEach(([server, tools]) => {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'chat-tool-item';
-
-        const header = document.createElement('h3');
-        header.textContent = server;
-        wrapper.appendChild(header);
-
-        if (!tools.length) {
-            const empty = document.createElement('div');
-            empty.textContent = 'No callable endpoints';
-            empty.className = 'empty-state';
-            wrapper.appendChild(empty);
-        } else {
-            const list = document.createElement('ul');
-            tools.forEach((tool) => {
-                const li = document.createElement('li');
-                li.innerHTML = `<code>${tool}</code>`;
-                list.appendChild(li);
-            });
-            wrapper.appendChild(list);
-        }
-
-        toolsContainer.appendChild(wrapper);
-    });
-}
-
 function renderSessionMeta() {
     const { sessionMeta } = getChatElements();
     if (!sessionMeta) return;
@@ -1293,8 +2052,11 @@ function renderSessionMeta() {
         return;
     }
 
-    const created = new Date(chatState.session.createdAt || Date.now());
-    sessionMeta.innerHTML = `Session <code>${chatState.session.id}</code> • Created ${created.toLocaleString()}`;
+    const sessionId = String(chatState.session.id || '').slice(0, 12);
+    const provider = chatState.session.provider || 'unknown provider';
+    const model = chatState.session.model || 'unknown model';
+    const toolCount = chatState.session.tools?.length || 0;
+    sessionMeta.textContent = `Session ${sessionId} · ${provider} / ${model} · ${toolCount} tools`;
 }
 
 function showChatAlert(message, variant = 'info') {
@@ -1302,8 +2064,13 @@ function showChatAlert(message, variant = 'info') {
     if (!alertsContainer) return;
 
     const node = document.createElement('div');
-    node.className = `chat-alert ${variant}`;
-    node.innerHTML = `<span>${message}</span>`;
+    const safeVariant = ['info', 'success', 'error', 'warning'].includes(variant)
+        ? variant
+        : 'info';
+    node.className = `chat-alert ${safeVariant}`;
+    const text = document.createElement('span');
+    text.textContent = getChatErrorMessage(message, 'Request failed');
+    node.appendChild(text);
 
     alertsContainer.prepend(node);
     setTimeout(() => {

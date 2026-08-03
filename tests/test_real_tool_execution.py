@@ -1,66 +1,124 @@
 import asyncio
+import json
+import sys
+import textwrap
 import pytest
 import httpx
 from fastapi.testclient import TestClient
 from unittest.mock import patch
+import mcpo.services.state as state_mod
+
+MCP2_TIME_SERVER_SOURCE = """
+from datetime import UTC, datetime
+from typing import Literal
+
+from mcp.server import MCPServer
+
+server = MCPServer("mcpo-mcp2-stdio-test")
+
+
+@server.tool()
+def get_current_time(timezone: Literal["UTC"]) -> dict[str, str]:
+    return {
+        "timezone": timezone,
+        "datetime": datetime.now(UTC).isoformat(timespec="seconds"),
+    }
+
+
+if __name__ == "__main__":
+    server.run()
+"""
 
 # Test that simulates how OpenWebUI/models would call MCPO tool endpoints
 
 
 class TestRealToolExecution:
     """Test actual tool execution through HTTP endpoints like OpenWebUI models would do."""
-    
+
     @pytest.fixture
-    def live_server_client(self):
-        """Use the live running server instead of creating a new app instance."""
-        import requests
-        # Test if server is running
-        try:
-            response = requests.get("http://localhost:8000/_meta/servers", timeout=5)
-            if response.status_code == 200:
-                # Return a client that uses the live server
-                class LiveClient:
-                    def __init__(self):
-                        self.base_url = "http://localhost:8000"
-                        # Add API key authentication header
-                        self.headers = {"Authorization": "Bearer top-secret"}
-                    
-                    def get(self, path):
-                        return requests.get(f"{self.base_url}{path}", headers=self.headers)
-                    
-                    def post(self, path, json=None, headers=None):
-                        # Merge API key headers with any additional headers
-                        request_headers = self.headers.copy()
-                        if headers:
-                            request_headers.update(headers)
-                        return requests.post(f"{self.base_url}{path}", json=json, headers=request_headers)
-                
-                return LiveClient()
-            else:
-                pytest.skip("Live server not running on localhost:8000")
-        except Exception:
-            pytest.skip("Cannot connect to live server on localhost:8000")
+    def live_server_client(self, tmp_path, monkeypatch):
+        """Spin up a self-contained MCPO instance for this test: its own throwaway
+        config, its own throwaway state file, and an MCP 2 stdio server. Hermetic
+        by construction -- does not talk to any developer's locally
+        running mcpo server (no port, no socket at all: in-process ASGI via
+        TestClient) and does not read/write the real mcpo_state.json, so results
+        can't depend on whether a developer has the time server enabled/disabled
+        on their own instance.
+        """
+        from mcpo.main import build_main_app
 
-    def test_time_server_new_york_via_http(self, live_server_client):
-        """Test getting New York time through HTTP endpoint like OpenWebUI model would."""
-        
+        # Isolate the process-wide StateManager singleton (server enabled/disabled
+        # flags are read from mcpo_state.json via this singleton, not from
+        # mcpo.json) so this test never reads/writes the real mcpo_state.json.
+        # monkeypatch restores the original singleton on teardown.
+        monkeypatch.setattr(
+            state_mod,
+            "_global_state_manager",
+            state_mod.StateManager(state_file_path=str(tmp_path / "test_state.json")),
+        )
+
+        server_script = tmp_path / "mcp2_time_server.py"
+        server_script.write_text(
+            textwrap.dedent(MCP2_TIME_SERVER_SOURCE),
+            encoding="utf-8",
+        )
+        cfg = {
+            "mcpServers": {
+                "time": {
+                    "enabled": True,
+                    "command": sys.executable,
+                    "args": [str(server_script)],
+                }
+            }
+        }
+        cfg_path = tmp_path / "mcpo.json"
+        cfg_path.write_text(json.dumps(cfg))
+
+        app = asyncio.run(build_main_app(config_path=str(cfg_path)))
+
+        class SelfContainedClient:
+            """Adapter matching the old LiveClient interface, backed by an
+            in-process TestClient (real ASGI request/response handling -- the
+            same header/middleware code path as a real socket, just without
+            the socket)."""
+
+            def __init__(self, test_client: TestClient):
+                self._tc = test_client
+                self.headers = {}
+
+            def get(self, path):
+                return self._tc.get(path, headers=self.headers)
+
+            def post(self, path, json=None, headers=None):
+                request_headers = dict(self.headers)
+                if headers:
+                    request_headers.update(headers)
+                return self._tc.post(path, json=json, headers=request_headers)
+
+        # TestClient's context manager runs the ASGI lifespan synchronously,
+        # so by the time the block is entered the 'time' sub-app is already
+        # connected (readiness wait); __exit__ runs lifespan shutdown, which
+        # tears down the stdio MCP server subprocess.
+        with TestClient(app) as test_client:
+            response = test_client.get("/_meta/servers")
+            assert response.status_code == 200
+            time_server = next(
+                (
+                    item
+                    for item in response.json()["servers"]
+                    if item["name"] == "time"
+                ),
+                None,
+            )
+            assert time_server is not None
+            assert time_server["enabled"] is True, time_server
+            assert time_server["connected"] is True, time_server
+            yield SelfContainedClient(test_client)
+
+    def test_mcp2_time_server_utc_via_http(self, live_server_client):
+        """Execute a tool served by the repository's pinned MCP 2 SDK."""
+
         client = live_server_client
-        
-        # First verify the server is available
-        servers_response = client.get("/_meta/servers")
-        assert servers_response.status_code == 200
-        servers_data = servers_response.json()
-
-        # Check if time server is available
-        time_server_found = False
-        for server in servers_data["servers"]:
-            if server["name"] == "time":
-                time_server_found = True
-                assert server["enabled"] is True
-                break
-
-        if not time_server_found:
-            pytest.skip("Time server not configured or not enabled")
 
         # Get available tools for time server
         tools_response = client.get("/_meta/servers/time/tools")
@@ -77,9 +135,7 @@ class TestRealToolExecution:
         assert get_time_tool is not None, "get_current_time tool not found"
 
         # Now call the tool endpoint like OpenWebUI model would
-        tool_payload = {
-            "timezone": "America/New_York"
-        }
+        tool_payload = {"timezone": "UTC"}
         
         tool_response = client.post("/time/get_current_time", json=tool_payload)
 
@@ -91,16 +147,7 @@ class TestRealToolExecution:
         assert "result" in result
         assert "datetime" in result["result"]
         assert "timezone" in result["result"]
-        assert result["result"]["timezone"] == "America/New_York"        # The result should contain time information
-        if isinstance(result["result"], str):
-            # Simple text response
-            assert "New York" in result["result"] or "America/New_York" in result["result"]
-        elif isinstance(result["result"], dict):
-            # Structured response
-            assert "time" in str(result["result"]) or "timezone" in str(result["result"])
-        else:
-            # List response
-            assert len(result["result"]) > 0
+        assert result["result"]["timezone"] == "UTC"
 
     def test_time_server_error_handling(self):
         """Test error handling for invalid timezone."""

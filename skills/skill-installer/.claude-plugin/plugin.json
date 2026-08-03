@@ -1,0 +1,7 @@
+{
+  "name": "skill-installer",
+  "description": "Inspect and safely manage isolated Python and npm CLI packages and MCPO skill packages through MCPO management HTTP endpoints.",
+  "author": {
+    "name": "MCPO"
+  }
+}

@@ -8,6 +8,8 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileModifiedEvent, FileMovedEvent, FileCreatedEvent
 import threading
 
+from mcpo.utils.config import interpolate_env_placeholders_in_config, normalize_config_shape
+
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +103,9 @@ class ConfigChangeHandler(FileSystemEventHandler):
             with open(self.config_path, 'r') as f:
                 new_config = json.load(f)
 
+            new_config = normalize_config_shape(new_config)
+            new_config = interpolate_env_placeholders_in_config(new_config)
+
             # Call the reload callback
             await self.reload_callback(new_config)
 
@@ -125,9 +130,7 @@ class ConfigWatcher:
     def start(self):
         """Start watching the config file."""
         if not self.config_path.exists():
-            logger.error(f"Config file does not exist: {self.config_path}")
-            return
-
+            logger.info(f"Config file does not exist yet; watching parent directory: {self.config_path}")
         # Get the current event loop
         try:
             self.loop = asyncio.get_running_loop()

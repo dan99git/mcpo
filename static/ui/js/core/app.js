@@ -50,6 +50,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 0);
 
     // Then load dynamic content
+    bindRestToolsHandlers();
+    await loadRestToolsState();
     await updateServerStates();
     // Fetch and render basic stats (uptime, version)
     try {

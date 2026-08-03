@@ -15,7 +15,9 @@ from mcp.types import (
     INTERNAL_ERROR,
 )
 
-from mcp.shared.exceptions import McpError
+# mcp 2.0: McpError renamed to MCPError (mcp/shared/exceptions.py); alias keeps
+# our except-sites unchanged.
+from mcp.shared.exceptions import MCPError as McpError
 
 from pydantic import Field, create_model
 from mcpo.services.runner import get_runner_service
@@ -56,7 +58,7 @@ def process_tool_response(result: CallToolResult) -> list:
                     pass
             response.append(text)
         elif isinstance(content, types.ImageContent):
-            image_data = f"data:{content.mimeType};base64,{content.data}"
+            image_data = f"data:{content.mime_type};base64,{content.data}"
             response.append(image_data)
         elif isinstance(content, types.EmbeddedResource):
             # Handle embedded resources
@@ -408,7 +410,9 @@ def get_model_fields(form_model_name, properties, required_fields, schema_defs=N
     return model_fields
 
 
-SUPPORTED_MCP_VERSIONS = ["2025-06-18"]
+# Protocol versions this proxy accepts from inbound clients (newest first).
+# Outbound connections to backends stay on MCP_VERSION (see mcpo/main.py).
+SUPPORTED_MCP_VERSIONS = ["2026-07-28", "2025-11-25", "2025-06-18"]
 
 
 def get_tool_handler(
@@ -437,23 +441,40 @@ def get_tool_handler(
 
                 # Enforce server/tool enabled (support legacy main app state and service)
                 parent_app = getattr(request.app.state, "parent_app", None)
-                server_name = request.app.title
+                server_name = getattr(request.app.state, "config_key", None) or request.app.title
                 tool_name = endpoint_name
                 # Prefer legacy parent_app.state maps if present (tests manipulate these)
-                disabled = False
+                state_manager = (
+                    getattr(parent_app.state, "state_manager", None)
+                    if parent_app is not None
+                    else None
+                ) or get_state_manager()
+                if not state_manager.is_rest_tools_enabled():
+                    aggregator.record_error("disabled")
+                    # Returned directly (not raised) so it goes out as the codebase's
+                    # standard {"ok": false, "error": {...}} envelope -- this check runs
+                    # before the try/except below, so a raised HTTPException here would
+                    # instead surface as FastAPI's raw {"detail": ...} shape.
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "ok": False,
+                            "error": {"message": "REST tools are globally disabled", "code": "disabled"},
+                        },
+                    )
+                server_enabled = state_manager.is_server_enabled(server_name)
                 if parent_app is not None and hasattr(parent_app.state, "tool_enabled"):
-                    # If tool is explicitly false -> disabled
-                    disabled = not parent_app.state.tool_enabled.get(server_name, {}).get(tool_name, True)
+                    tool_enabled = parent_app.state.tool_enabled.get(server_name, {}).get(tool_name, True)
                 else:
-                    state_manager = get_state_manager()
-                    disabled = not state_manager.is_tool_enabled(server_name, tool_name)
-                if disabled:
+                    tool_enabled = state_manager.is_tool_enabled(server_name, tool_name)
+                if not server_enabled or not tool_enabled:
                     aggregator.record_error("disabled")
                     raise HTTPException(status_code=403, detail={"message": "Tool disabled", "code": "disabled"})
 
                 # Protocol version header warning (for observability)
                 recv = request.headers.get("MCP-Protocol-Version")
-                if recv != SUPPORTED_MCP_VERSIONS[0]:
+                if recv not in SUPPORTED_MCP_VERSIONS:
                     logger.warning(
                         f"Protocol warn: Unsupported or missing MCP-Protocol-Version; supported={SUPPORTED_MCP_VERSIONS}; received={recv}"
                     )
@@ -570,20 +591,38 @@ def get_tool_handler(
 
                 # Enforce server/tool enabled
                 parent_app = getattr(request.app.state, "parent_app", None)
-                server_name = request.app.title
+                server_name = getattr(request.app.state, "config_key", None) or request.app.title
                 tool_name = endpoint_name
-                disabled = False
+                state_manager = (
+                    getattr(parent_app.state, "state_manager", None)
+                    if parent_app is not None
+                    else None
+                ) or get_state_manager()
+                if not state_manager.is_rest_tools_enabled():
+                    aggregator.record_error("disabled")
+                    # Returned directly (not raised) so it goes out as the codebase's
+                    # standard {"ok": false, "error": {...}} envelope -- this check runs
+                    # before the try/except below, so a raised HTTPException here would
+                    # instead surface as FastAPI's raw {"detail": ...} shape.
+                    from fastapi.responses import JSONResponse
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "ok": False,
+                            "error": {"message": "REST tools are globally disabled", "code": "disabled"},
+                        },
+                    )
+                server_enabled = state_manager.is_server_enabled(server_name)
                 if parent_app is not None and hasattr(parent_app.state, "tool_enabled"):
-                    disabled = not parent_app.state.tool_enabled.get(server_name, {}).get(tool_name, True)
+                    tool_enabled = parent_app.state.tool_enabled.get(server_name, {}).get(tool_name, True)
                 else:
-                    state_manager = get_state_manager()
-                    disabled = not state_manager.is_tool_enabled(server_name, tool_name)
-                if disabled:
+                    tool_enabled = state_manager.is_tool_enabled(server_name, tool_name)
+                if not server_enabled or not tool_enabled:
                     aggregator.record_error("disabled")
                     raise HTTPException(status_code=403, detail={"message": "Tool disabled", "code": "disabled"})
 
                 recv = request.headers.get("MCP-Protocol-Version")
-                if recv != SUPPORTED_MCP_VERSIONS[0]:
+                if recv not in SUPPORTED_MCP_VERSIONS:
                     logger.warning(
                         f"Protocol warn: Unsupported or missing MCP-Protocol-Version; supported={SUPPORTED_MCP_VERSIONS}; received={recv}"
                     )

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -56,6 +58,126 @@ def _as_json_str(content: Any) -> str:
 def _json(obj: Any) -> str:
     """Compact JSON serialization for streaming."""
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+
+
+_ANTHROPIC_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+}
+
+
+def _parse_base64_data_url(value: Any, label: str) -> tuple[str, str]:
+    if not isinstance(value, str) or not value.startswith("data:"):
+        raise AnthropicError(f"{label} must be a base64 data URL")
+    header, separator, data = value.partition(",")
+    if not separator or not data:
+        raise AnthropicError(f"{label} is an incomplete data URL")
+    metadata = header[5:].split(";")
+    media_type = metadata[0].lower()
+    if not media_type or "base64" not in {item.lower() for item in metadata[1:]}:
+        raise AnthropicError(f"{label} must declare a MIME type and base64 encoding")
+    try:
+        base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise AnthropicError(f"{label} contains invalid base64 data") from exc
+    return media_type, data
+
+
+def _anthropic_user_content(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        raise AnthropicError(
+            "Anthropic user content must be a string or an array of content blocks"
+        )
+
+    mapped: List[Dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict):
+            raise AnthropicError(
+                f"Anthropic content block {index} must be an object"
+            )
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text")
+            if not isinstance(text, str):
+                raise AnthropicError(
+                    f"Anthropic text block {index} must contain string text"
+                )
+            mapped.append({"type": "text", "text": text})
+            continue
+
+        if block_type == "image_url":
+            image = block.get("image_url")
+            if isinstance(image, dict):
+                image = image.get("url")
+            if isinstance(image, str) and not image.startswith("data:"):
+                raise AnthropicError(
+                    "Remote image URLs are not supported by this Anthropic adapter"
+                )
+            media_type, data = _parse_base64_data_url(
+                image, f"Anthropic image block {index}"
+            )
+            if media_type not in _ANTHROPIC_IMAGE_MIME_TYPES:
+                raise AnthropicError(
+                    f"Anthropic image block {index} has unsupported MIME type "
+                    f"'{media_type}'"
+                )
+            mapped.append({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            })
+            continue
+
+        if block_type == "file":
+            file_block = block.get("file")
+            if not isinstance(file_block, dict):
+                raise AnthropicError(
+                    f"Anthropic file block {index} must contain a file object"
+                )
+            source_keys = [
+                key
+                for key in ("file_data", "file_id", "file_url")
+                if file_block.get(key) is not None
+            ]
+            if len(source_keys) != 1:
+                raise AnthropicError(
+                    f"Anthropic file block {index} must provide exactly one file source"
+                )
+            if source_keys[0] != "file_data":
+                raise AnthropicError(
+                    "Remote file URLs and provider file IDs are not supported by "
+                    "this Anthropic adapter"
+                )
+            media_type, data = _parse_base64_data_url(
+                file_block["file_data"], f"Anthropic file block {index}"
+            )
+            if media_type != "application/pdf":
+                raise AnthropicError(
+                    f"Anthropic file block {index} has unsupported MIME type "
+                    f"'{media_type}'"
+                )
+            mapped.append({
+                "type": "document",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            })
+            continue
+
+        raise AnthropicError(
+            f"Unsupported Anthropic content block type '{block_type}' at index {index}"
+        )
+    return mapped
+
 
 class AnthropicClient:
     """
@@ -188,12 +310,8 @@ class AnthropicClient:
 
             # --- User ---
             if role == "user":
-                content_blocks = []
-                if isinstance(content, str):
-                    content_blocks.append({"type": "text", "text": content})
-                elif isinstance(content, list):
-                    content_blocks.extend(content)
-                
+                content_blocks = _anthropic_user_content(content)
+
                 if self._enable_prompt_caching and len(formatted_messages) > 10:
                      if content_blocks:
                          content_blocks[-1]["cache_control"] = {"type": "ephemeral"}

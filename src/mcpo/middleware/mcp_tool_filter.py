@@ -1,207 +1,175 @@
-"""
-MCP Tool Filtering Middleware
+"""BOS tool visibility and execution policy for native MCP requests.
 
-Intercepts MCP protocol messages to filter tools based on mcpo_state.json.
-This ensures tool enable/disable toggles work on the FastMCP proxy (port 8001).
+FastMCP invokes this middleware only after the MCP SDK has validated and typed the
+request. Wire protocol validation, discovery, caching, streaming, and transport
+errors remain owned by the SDK.
 """
 
-import json
+from __future__ import annotations
+
 import logging
-from typing import Any, Dict, List
+from collections.abc import Sequence
+from typing import Any, Dict, Optional
 
-from starlette.types import ASGIApp, Receive, Scope, Send
+import mcp_types as mt
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import Tool, ToolResult
 
 from mcpo.services.state import get_state_manager
 
 logger = logging.getLogger(__name__)
 
 
-class MCPToolFilterMiddleware:
-    """
-    ASGI middleware that filters MCP tools based on StateManager.
-    
-    Intercepts:
-    - tools/list responses → filters disabled tools
-    - tools/call requests → blocks disabled tools with 403
-    """
-    
-    def __init__(self, app: ASGIApp, server_name: str = None):
-        self.app = app
-        self.server_name = server_name  # None = aggregate proxy (multi-server)
+class MCPToolFilterMiddleware(Middleware):
+    """Filter listed tools and block disabled calls after protocol validation."""
+
+    def __init__(
+        self,
+        app: Any = None,
+        server_name: Optional[str] = None,
+        server_names: Optional[Sequence[str]] = None,
+    ) -> None:
+        # ``app`` is accepted for compatibility with callers that constructed the
+        # former ASGI middleware directly. It is intentionally unused.
+        self.server_name = server_name
+        normalized_names = {str(name) for name in (server_names or ()) if name}
+        self.server_names = tuple(
+            sorted(normalized_names, key=lambda name: (-len(name), name))
+        )
         self.state_manager = get_state_manager()
-    
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """ASGI interface - intercept and filter MCP messages."""
-        
-        if scope["type"] != "http":
-            # Only process HTTP requests
-            await self.app(scope, receive, send)
-            return
-        
-        # Capture request body to check for MCP method
-        body_parts: List[bytes] = []
-        
-        async def receive_wrapper() -> Dict[str, Any]:
-            """Capture request body for inspection."""
-            message = await receive()
-            if message["type"] == "http.request":
-                body = message.get("body", b"")
-                if body:
-                    body_parts.append(body)
-            return message
-        
-        # Track response state for filtering
-        response_started = False
-        response_body_parts: List[bytes] = []
-        is_streaming = False
-        start_message_held = None
-        
-        async def send_wrapper(message: Dict[str, Any]) -> None:
-            """Intercept response to filter tools."""
-            nonlocal response_started, is_streaming, start_message_held
-            
-            if message["type"] == "http.response.start":
-                response_started = True
-                
-                # Check if this is a streaming response (SSE or chunked)
-                headers = dict(message.get("headers", []))
-                content_type = headers.get(b"content-type", b"").decode("utf-8", errors="ignore").lower()
-                
-                # Pass through SSE and streaming responses without modification
-                if "text/event-stream" in content_type or "stream" in content_type:
-                    is_streaming = True
-                    await send(message)
-                    return
-                
-                # Hold the start message for potential JSON filtering
-                start_message_held = message
-                return
-            
-            if message["type"] == "http.response.body":
-                # If streaming, pass through immediately
-                if is_streaming:
-                    await send(message)
-                    return
-                
-                body = message.get("body", b"")
-                if body:
-                    response_body_parts.append(body)
-                
-                # If this is the last chunk, process and send
-                if not message.get("more_body", False):
-                    full_body = b"".join(response_body_parts)
-                    
-                    # Try to parse as MCP JSON-RPC
-                    try:
-                        data = json.loads(full_body)
-                        filtered_data = self._filter_mcp_message(data)
-                        filtered_body = json.dumps(filtered_data).encode()
-                        
-                        # Send the start message we held, preserving original headers
-                        held_headers = start_message_held.get("headers", [(b"content-type", b"application/json")])
-                        await send({"type": "http.response.start", "status": start_message_held.get("status", 200), "headers": held_headers})
-                        
-                        # Send filtered body
-                        await send({"type": "http.response.body", "body": filtered_body})
-                        return
-                    except (json.JSONDecodeError, Exception) as e:
-                        logger.debug(f"Not filtering response: {e}")
-                        # Not JSON or error - pass through as-is with original start message
-                        if start_message_held:
-                            await send(start_message_held)
-                        else:
-                            await send({"type": "http.response.start", "status": start_message_held.get("status", 200) if start_message_held else 200})
-                        await send({"type": "http.response.body", "body": full_body})
-                        return
-                return
-            
-            # Pass through other messages
-            await send(message)
-        
-        # Call the wrapped app
-        await self.app(scope, receive_wrapper, send_wrapper)
-    
-    def _filter_mcp_message(self, data: Dict[str, Any]) -> Dict[str, Any]:
-        """Filter MCP protocol messages based on tool enabled state."""
-        
-        # Handle JSON-RPC batch
-        if isinstance(data, list):
-            return [self._filter_single_message(msg) for msg in data]
-        
-        return self._filter_single_message(data)
-    
-    def _filter_single_message(self, message: Dict[str, Any]) -> Dict[str, Any]:
-        """Filter a single MCP message."""
-        
-        # Check if this is a tools/list response
-        if "result" in message and "tools" in message.get("result", {}):
-            tools = message["result"]["tools"]
-            
-            if self.server_name:
-                # Single server filtering
-                filtered_tools = [
-                    tool for tool in tools
-                    if self.state_manager.is_tool_enabled(self.server_name, tool.get("name", ""))
-                ]
-                logger.info(
-                    f"Filtered tools for '{self.server_name}': "
-                    f"{len(tools)} → {len(filtered_tools)} tools"
+
+    async def on_list_tools(
+        self,
+        context: MiddlewareContext[mt.ListToolsRequest],
+        call_next: CallNext[mt.ListToolsRequest, Sequence[Tool]],
+    ) -> Sequence[Tool]:
+        self.state_manager.refresh_if_changed()
+        tools = await call_next(context)
+        filtered: list[Tool] = []
+        for tool in tools:
+            annotations = None
+            if tool.annotations is not None:
+                annotations = tool.annotations.model_dump(
+                    mode="json",
+                    by_alias=True,
+                    exclude_none=True,
                 )
-            else:
-                # Aggregate proxy - infer server from tool name
-                filtered_tools = []
-                for tool in tools:
-                    tool_name = tool.get("name", "")
-                    # Try to infer server from tool name (format: "server__tool" or just "tool")
-                    if "__" in tool_name:
-                        server_part = tool_name.split("__")[0]
-                    else:
-                        # Check description or annotations for server hint
-                        server_part = tool.get("annotations", {}).get("server")
-                        if not server_part:
-                            # Fallback: check all servers for this tool
-                            server_part = self._find_server_for_tool(tool_name)
-                    
-                    if server_part and self.state_manager.is_tool_enabled(server_part, tool_name):
-                        filtered_tools.append(tool)
-                
-                logger.info(
-                    f"Filtered tools for aggregate proxy: "
-                    f"{len(tools)} → {len(filtered_tools)} tools"
+            server_name, state_tool_name = self._resolve_tool_name(
+                tool.name,
+                annotations,
+            )
+            if self._is_tool_available(server_name, state_tool_name):
+                filtered.append(tool)
+
+        filtered.sort(key=lambda item: item.name)
+        logger.info(
+            "Filtered tools for '%s': %d -> %d tools",
+            self.server_name or "aggregate proxy",
+            len(tools),
+            len(filtered),
+        )
+        return filtered
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        self.state_manager.refresh_if_changed()
+        tool_name = context.message.name
+        server_name, state_tool_name = self._resolve_tool_name(tool_name)
+        if self._is_tool_available(server_name, state_tool_name):
+            return await call_next(context)
+
+        logger.warning("Blocked call to disabled tool: %s/%s", server_name, tool_name)
+        return ToolResult(
+            content=[
+                mt.TextContent(
+                    type="text",
+                    text=f"Tool '{tool_name}' is disabled",
                 )
-            
-            message["result"]["tools"] = filtered_tools
-            return message
-        
-        # Check if this is a tools/call request (shouldn't happen in response, but defensive)
-        if "method" in message and message.get("method") == "tools/call":
-            params = message.get("params", {})
-            tool_name = params.get("name", "")
-            
-            server_to_check = self.server_name
-            if not server_to_check and "__" in tool_name:
-                server_to_check = tool_name.split("__")[0]
-            elif not server_to_check:
-                server_to_check = self._find_server_for_tool(tool_name)
-            
-            if server_to_check and not self.state_manager.is_tool_enabled(server_to_check, tool_name):
-                logger.warning(f"Blocked call to disabled tool: {server_to_check}/{tool_name}")
-                return {
-                    "jsonrpc": "2.0",
-                    "id": message.get("id"),
-                    "error": {
-                        "code": 403,
-                        "message": f"Tool '{tool_name}' is disabled",
-                        "data": {"tool": tool_name, "server": server_to_check}
-                    }
+            ],
+            is_error=True,
+            meta={
+                "mcpo": {
+                    "code": "tool_disabled",
+                    "tool": tool_name,
+                    "server": server_name,
                 }
-        
-        return message
-    
-    def _find_server_for_tool(self, tool_name: str) -> str:
-        """Find which server a tool belongs to by checking state."""
+            },
+        )
+
+    def _is_tool_available(self, server_name: str, tool_name: str) -> bool:
+        if not server_name:
+            return not self.server_names
+        return (
+            self.state_manager.is_server_enabled(server_name)
+            and self.state_manager.is_tool_enabled(server_name, tool_name)
+        )
+
+    def _resolve_tool_name(
+        self,
+        tool_name: str,
+        annotations: Optional[Dict[str, Any]] = None,
+    ) -> tuple[str, str]:
+        if self.server_name:
+            return self.server_name, tool_name
+
+        annotated_server = annotations.get("server") if annotations else None
+        if not isinstance(annotated_server, str):
+            annotated_server = None
+        if self.server_names:
+            matches = [
+                (server_name, tool_name[len(server_name) + 1 :])
+                for server_name in self.server_names
+                if tool_name.startswith(f"{server_name}_")
+            ]
+            if len(matches) == 1:
+                return matches[0]
+            return "", tool_name
+
+
         state = self.state_manager.get_all_states()
-        for server_name, server_data in state.items():
-            if tool_name in server_data.get("tools", {}):
-                return server_name
-        return ""
+        if isinstance(state, dict):
+            ordered_servers = sorted(state, key=len, reverse=True)
+            for server_name in ordered_servers:
+                server_data = state.get(server_name, {})
+                state_tools = (
+                    server_data.get("tools", {})
+                    if isinstance(server_data, dict)
+                    else {}
+                )
+                if tool_name in state_tools:
+                    return server_name, tool_name
+                for separator in ("__", "_"):
+                    prefix = f"{server_name}{separator}"
+                    if tool_name.startswith(prefix):
+                        candidate = tool_name[len(prefix):]
+                        if candidate in state_tools:
+                            return server_name, candidate
+
+            for server_name in ordered_servers:
+                for separator in ("__", "_"):
+                    prefix = f"{server_name}{separator}"
+                    if tool_name.startswith(prefix):
+                        return server_name, tool_name[len(prefix):]
+
+        if annotated_server:
+            for separator in ("__", "_"):
+                prefix = f"{annotated_server}{separator}"
+                if tool_name.startswith(prefix):
+                    return annotated_server, tool_name[len(prefix):]
+            return annotated_server, tool_name
+
+        if "__" in tool_name:
+            server_name, state_tool_name = tool_name.split("__", 1)
+            return server_name, state_tool_name
+        if "_" in tool_name:
+            server_name, state_tool_name = tool_name.split("_", 1)
+            return server_name, state_tool_name
+        return "", tool_name
+
+    def _find_server_for_tool(self, tool_name: str) -> str:
+        """Return the state server resolved for an exposed tool name."""
+        server_name, _ = self._resolve_tool_name(tool_name)
+        return server_name

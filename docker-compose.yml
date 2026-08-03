@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MCPO_API_KEY=${MCPO_API_KEY:-top-secret}
+      - MCPO_API_KEY=${MCPO_API_KEY:?Set MCPO_API_KEY}
     volumes:
       # Mount config and requirements for persistence
       - ./mcpo.json:/app/mcpo.json:rw
@@ -18,7 +18,7 @@ services:
     command: ["--config", "mcpo.json", "--hot-reload", "--port", "8000"]
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $${MCPO_API_KEY}\" http://localhost:8000/healthz"]
       interval: 30s
       timeout: 10s
       retries: 3

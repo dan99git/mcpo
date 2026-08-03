@@ -87,6 +87,15 @@ Change configuration without restarting—servers reconnect automatically.
 |------|----------|--------|
 | 8000 | HTTP/REST | **OpenAPI proxy** (`/{server}/{tool}`), Admin UI (`/ui`), management APIs (`/_meta/*`) |
 | 8001 | Streamable HTTP (MCP) | **Aggregated MCP endpoint** (`/mcp`) for clients that speak MCP natively |
+| 8351 | Streamable HTTP (MCP + OAuth) | **OAuth-protected MCP endpoint** (`/mcp`) for remote clients |
+
+### MCP Proxy Parity Invariant
+
+Ports `8001` and `8351` must expose the same servers, tools, filtering,
+calls, code-mode behavior, and toggle state on their aggregate `/mcp` and
+per-server endpoints. Port `8351` adds only OAuth discovery, authorization,
+token enforcement, and public URL handling. The `/global` route on port
+`8001` remains a legacy alias for its aggregate MCP endpoint.
 
 ---
 

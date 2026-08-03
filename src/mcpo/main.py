@@ -6,9 +6,12 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
+from copy import deepcopy
+from dataclasses import dataclass, field
 from pathlib import Path
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import asynccontextmanager
 from typing import Optional, Dict, Any, List
 from urllib.parse import urljoin
 from datetime import datetime, timezone
@@ -27,25 +30,62 @@ from starlette.routing import Mount
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
-from mcp.client.streamable_http import streamablehttp_client
+# mcp 2.0: streamablehttp_client renamed to streamable_http_client and the
+# headers= kwarg was removed; headers now travel on a pre-built httpx2 client
+# (mcp/client/streamable_http.py:640, mcp/shared/_httpx_utils.py:23).
+from mcp.client.streamable_http import streamable_http_client
+from mcp.shared._httpx_utils import create_mcp_http_client
 
-from mcpo.utils.auth import APIKeyMiddleware, get_verify_api_key
+
+@asynccontextmanager
+async def streamablehttp_client(url: str, headers=None):
+    """Compat shim for the mcp<2 streamablehttp_client(url, headers=...) API.
+
+    mcp 2.0 removed the headers kwarg; a caller-provided httpx2 AsyncClient
+    carries them instead, and the caller owns that client's lifecycle.
+    """
+    async with create_mcp_http_client(headers=headers) as http_client:
+        async with streamable_http_client(url, http_client=http_client) as streams:
+            yield streams
+
+from mcpo.utils.auth import (
+    APIKeyMiddleware,
+    ModelAPIKeyMiddleware,
+    get_verify_api_key,
+)
+from mcpo.middleware.request_limits import (
+    ChatBodyLimitMiddleware,
+    PackageArchiveBodyLimitMiddleware,
+)
 from mcpo.utils.main import (
     get_model_fields,
     get_tool_handler,
     normalize_server_type,
 )
-from mcpo.utils.config import interpolate_env_placeholders_in_config, normalize_config_shape
+from mcpo.utils.config import (
+    interpolate_env_placeholders_in_config,
+    normalize_config_shape,
+    replace_mcp_servers_preserving_shape,
+)
 from mcpo.utils.config_watcher import ConfigWatcher
-from mcpo.services.state import get_state_manager
+from mcpo.services.state import StateSaveError, get_state_manager
+from mcpo.services.model_api_keys import get_model_api_key_store
 from mcpo.services.logging import get_log_manager
 from mcpo.services.logging_handlers import BufferedLogHandler
 
-from mcpo.api.routers.admin import _mount_or_remount_fastmcp, router as admin_router
+from mcpo.api.routers.admin import (
+    _mount_or_remount_fastmcp,
+    _shutdown_fastmcp_proxy,
+    router as admin_router,
+)
 from mcpo.api.routers.chat import router as chat_router
 from mcpo.api.routers.completions import router as completions_router
+from mcpo.api.routers.model_api_keys import router as model_api_keys_router
+from mcpo.api.routers.providers import router as providers_router
 
-# MCP protocol version (used for outbound remote connections headers)
+# MCP protocol version for direct per-server ClientSession connections.
+# The native proxy negotiates 2026-07-28 and legacy backends independently in
+# mcpo/proxy.py. Keep this direct-client default legacy until that path negotiates.
 MCP_VERSION = "2025-06-18"
 
 
@@ -64,6 +104,43 @@ def error_envelope(message: str, code: str | None = None, data: Any | None = Non
 
 # Global reload lock to ensure atomic config reloads
 _reload_lock = asyncio.Lock()
+
+
+def _get_config_transaction_lock(main_app: FastAPI) -> asyncio.Lock:
+    """Return the app-wide lock covering config read, write, activate, and rollback."""
+    lock = getattr(main_app.state, "config_transaction_lock", None)
+    if lock is None:
+        lock = asyncio.Lock()
+        main_app.state.config_transaction_lock = lock
+    return lock
+
+
+class ConfigTransactionMiddleware:
+    """Serialize every HTTP configuration mutation as one control-plane transaction."""
+
+    _EXACT_MUTATIONS = {
+        ("POST", "/mcpo/post_config"),
+        ("POST", "/_meta/servers"),
+        ("POST", "/_meta/config/save"),
+        ("POST", "/_meta/config/mcpServers/save"),
+        ("POST", "/_meta/reload"),
+    }
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        method = str(scope.get("method", "")).upper()
+        path = str(scope.get("path", ""))
+        is_remove = method == "DELETE" and path.startswith("/_meta/servers/")
+        if scope.get("type") == "http" and (
+            (method, path) in self._EXACT_MUTATIONS or is_remove
+        ):
+            main_app = scope.get("app")
+            async with _get_config_transaction_lock(main_app):
+                await self.app(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
 
 # Global health snapshot
 _health_state: Dict[str, Any] = {
@@ -152,27 +229,34 @@ def validate_server_config(server_name: str, server_cfg: Dict[str, Any]) -> None
                 raise ValueError(f"Server '{server_name}' 'disabledTools' must contain only strings")
 
 
+def validate_config_data(config_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize and validate parsed MCPO configuration data."""
+    if not isinstance(config_data, dict):
+        raise ValueError("Configuration must be a JSON object.")
+
+    validated = normalize_config_shape(config_data)
+    validated = interpolate_env_placeholders_in_config(validated)
+    if "mcpServers" not in validated:
+        raise ValueError("No 'mcpServers' found in config file.")
+
+    mcp_servers = validated["mcpServers"]
+    if not isinstance(mcp_servers, dict):
+        raise ValueError("'mcpServers' must be an object.")
+
+    for server_name, server_cfg in mcp_servers.items():
+        if not isinstance(server_cfg, dict):
+            raise ValueError(f"Server '{server_name}' configuration must be an object")
+        validate_server_config(server_name, server_cfg)
+
+    return validated
+
+
 def load_config(config_path: str) -> Dict[str, Any]:
     """Load and validate config from file."""
     try:
         with open(config_path, "r") as f:
             config_data = json.load(f)
-
-        config_data = normalize_config_shape(config_data)
-
-        # Expand any ${VAR} placeholders from the current environment before validation
-        config_data = interpolate_env_placeholders_in_config(config_data)
-
-        mcp_servers = config_data.get("mcpServers", {})
-        if "mcpServers" not in config_data:
-            logger.error(f"No 'mcpServers' found in config file: {config_path}")
-            raise ValueError("No 'mcpServers' found in config file.")
-
-        # Validate each server configuration
-        for server_name, server_cfg in mcp_servers.items():
-            validate_server_config(server_name, server_cfg)
-
-        return config_data
+        return validate_config_data(config_data)
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in config file {config_path}: {e}")
         raise
@@ -248,35 +332,92 @@ def create_sub_app(server_name: str, server_cfg: Dict[str, Any], cors_allow_orig
 def mount_config_servers(main_app: FastAPI, config_data: Dict[str, Any],
                         cors_allow_origins, api_key: Optional[str], strict_auth: bool,
                         api_dependency, connection_timeout, lifespan, path_prefix: str):
-    """Mount MCP servers from config data."""
+    """Mount only config/state-enabled MCP servers."""
     mcp_servers = config_data.get("mcpServers", {})
-
+    state_manager = (
+        getattr(main_app.state, "state_manager", None) or get_state_manager()
+    )
     logger.info("Configuring MCP Servers:")
     for server_name, server_cfg in mcp_servers.items():
+        if isinstance(server_cfg, dict) and not server_cfg.get("enabled", True):
+            if state_manager.is_server_enabled(server_name):
+                state_manager.set_server_enabled(server_name, False)
+            logger.info("Skipping disabled server: '%s'", server_name)
+            continue
+        if not state_manager.is_server_enabled(server_name):
+            logger.info("Skipping disabled server: '%s'", server_name)
+            continue
         sub_app = create_sub_app(
             server_name, server_cfg, cors_allow_origins, api_key,
             strict_auth, api_dependency, connection_timeout, lifespan
         )
-        # Link back to main app
         sub_app.state.parent_app = main_app
         main_app.mount(f"{path_prefix}{server_name}", sub_app)
 
 
-def unmount_servers(main_app: FastAPI, path_prefix: str, server_names: list):
-    """Unmount specific MCP servers."""
-    active_lifespans = getattr(main_app.state, 'active_lifespans', {})
-    for server_name in server_names:
-        mount_path = f"{path_prefix}{server_name}"
+def _server_mount_path(main_app: FastAPI, server_name: str) -> str:
+    return f"{getattr(main_app.state, 'path_prefix', '/')}{server_name}"
 
-        # Clean up lifespan context if it exists
-        if server_name in active_lifespans:
-            lifespan_context = active_lifespans[server_name]
-            try:
-                asyncio.create_task(lifespan_context.__aexit__(None, None, None))
-            except Exception as e:
-                logger.warning(f"Error cleaning up lifespan for {server_name}: {e}")
-            finally:
-                del active_lifespans[server_name]
+def _server_name_from_mount(route: Mount) -> str:
+    """Return the configured server key independently of its URL prefix."""
+    route_state = getattr(getattr(route, "app", None), "state", None)
+    config_key = getattr(route_state, "config_key", None)
+    if isinstance(config_key, str) and config_key:
+        return config_key
+    return str(getattr(route, "path", "")).strip("/")
+
+def _find_server_mounts(main_app: FastAPI, server_name: str) -> list:
+    mount_path = _server_mount_path(main_app, server_name)
+    return [route for route in main_app.router.routes
+            if isinstance(route, Mount) and getattr(route, "path", None) == mount_path]
+
+def _remove_server_mounts(main_app: FastAPI, server_name: str) -> list:
+    removed = _find_server_mounts(main_app, server_name)
+    for route in removed:
+        main_app.router.routes.remove(route)
+    if removed:
+        logger.info("Unmounted server: %s", server_name)
+    return removed
+
+def _create_configured_server_app(main_app: FastAPI, server_name: str) -> Optional[FastAPI]:
+    config_data = getattr(main_app.state, "config_data", {}) or {}
+    servers = config_data.get("mcpServers", {}) if isinstance(config_data, dict) else {}
+    server_cfg = servers.get(server_name)
+    if not isinstance(server_cfg, dict):
+        return None
+    sub_app = create_sub_app(
+        server_name, server_cfg,
+        getattr(main_app.state, "cors_allow_origins", ["*"]),
+        getattr(main_app.state, "api_key", None),
+        getattr(main_app.state, "strict_auth", False),
+        getattr(main_app.state, "api_dependency", None),
+        getattr(main_app.state, "connection_timeout", None),
+        getattr(main_app.state, "lifespan", None),
+    )
+    sub_app.state.parent_app = main_app
+    return sub_app
+
+async def unmount_servers(main_app: FastAPI, path_prefix: str, server_names: list):
+    """Unmount specific MCP servers.
+
+    Tears down each server's runtime (session + transport + child, if any) via the
+    server_runtimes registry and awaits it BEFORE removing the route, so the old
+    child is dead before any replacement is mounted. Uniform across config-initial
+    and dynamically-added servers -- there is one registry, not a special case per
+    origin.
+    """
+    for server_name in server_names:
+        result = await teardown_server_runtime(main_app, server_name)
+        if not result.get("ok", True):
+            error = result.get("error") or "unknown teardown error"
+            logger.error(
+                "Teardown for '%s' during unmount failed: %s",
+                server_name,
+                error,
+            )
+            raise RuntimeError(f"Teardown for '{server_name}' failed: {error}")
+
+        mount_path = f"{path_prefix}{server_name}"
 
         # Find and remove the mount
         routes_to_remove = []
@@ -290,117 +431,765 @@ def unmount_servers(main_app: FastAPI, path_prefix: str, server_names: list):
 
 
 async def reload_config_handler(main_app: FastAPI, new_config_data: Dict[str, Any]):
-    """Handle config reload by comparing and updating mounted servers."""
+    """Activate one config generation and compensate changed runtimes on failure."""
     async with _reload_lock:
-        old_config_data = getattr(main_app.state, 'config_data', {})
-        backup_routes = list(main_app.router.routes)  # Backup current routes for rollback
+        old_config_data = deepcopy(
+            getattr(main_app.state, "config_data", {})
+        )
+        backup_routes = list(main_app.router.routes)
+        affected_names: list[str] = []
+        previous_runtimes: Dict[str, Any] = {}
+        previous_runtime_alive: set[str] = set()
+        previous_runtime_connected: Dict[str, bool] = {}
+        previous_server_enabled: Dict[str, bool] = {}
+        state_manager = None
 
         try:
-            old_servers = set(old_config_data.get("mcpServers", {}).keys())
-            new_servers = set(new_config_data.get("mcpServers", {}).keys())
+            old_servers = old_config_data.get("mcpServers", {})
+            new_servers = new_config_data.get("mcpServers", {})
+            old_names = list(old_servers)
+            new_names = list(new_servers)
+            old_name_set = set(old_names)
+            new_name_set = set(new_names)
 
-            servers_to_add = new_servers - old_servers
-            servers_to_remove = old_servers - new_servers
-            servers_to_check = old_servers & new_servers
+            servers_to_remove = [
+                name for name in old_names if name not in new_name_set
+            ]
+            servers_to_update = [
+                name
+                for name in old_names
+                if name in new_name_set
+                and old_servers[name] != new_servers[name]
+            ]
+            servers_to_add = [
+                name for name in new_names if name not in old_name_set
+            ]
+            activation_names = [
+                name
+                for name in new_names
+                if name in set(servers_to_add) | set(servers_to_update)
+            ]
+            affected_names = [
+                name
+                for name in old_names
+                if name in set(servers_to_remove) | set(servers_to_update)
+            ] + servers_to_add
 
-            cors_allow_origins = getattr(main_app.state, 'cors_allow_origins', ["*"])
-            api_key = getattr(main_app.state, 'api_key', None)
-            strict_auth = getattr(main_app.state, 'strict_auth', False)
-            api_dependency = getattr(main_app.state, 'api_dependency', None)
-            connection_timeout = getattr(main_app.state, 'connection_timeout', None)
-            lifespan = getattr(main_app.state, 'lifespan', None)
-            path_prefix = getattr(main_app.state, 'path_prefix', "/")
-            state_manager = get_state_manager()
+            cors_allow_origins = getattr(
+                main_app.state,
+                "cors_allow_origins",
+                ["*"],
+            )
+            api_key = getattr(main_app.state, "api_key", None)
+            strict_auth = getattr(main_app.state, "strict_auth", False)
+            api_dependency = getattr(main_app.state, "api_dependency", None)
+            connection_timeout = getattr(
+                main_app.state,
+                "connection_timeout",
+                None,
+            )
+            lifespan = getattr(main_app.state, "lifespan", None)
+            path_prefix = getattr(main_app.state, "path_prefix", "/")
+            state_manager = (
+                getattr(main_app.state, "state_manager", None) or get_state_manager()
+            )
+
+            runtime_registry = _get_server_runtimes(main_app)
+            previous_runtimes = {
+                name: runtime_registry[name]
+                for name in affected_names
+                if name in runtime_registry
+            }
+            previous_runtime_alive = {
+                name
+                for name, runtime in previous_runtimes.items()
+                if _runtime_is_alive(runtime)
+            }
+            previous_runtime_connected = {
+                name: bool(getattr(runtime, "connected", False))
+                for name, runtime in previous_runtimes.items()
+            }
+            previous_server_enabled = {
+                name: state_manager.is_server_enabled(name)
+                for name in affected_names
+            }
+
+            candidate_apps: Dict[str, FastAPI] = {}
+            for server_name in activation_names:
+                server_cfg = new_servers[server_name]
+                if (
+                    isinstance(server_cfg, dict)
+                    and not server_cfg.get("enabled", True)
+                ):
+                    continue
+                if not state_manager.is_server_enabled(server_name):
+                    continue
+                sub_app = create_sub_app(
+                    server_name,
+                    server_cfg,
+                    cors_allow_origins,
+                    api_key,
+                    strict_auth,
+                    api_dependency,
+                    connection_timeout,
+                    lifespan,
+                )
+                sub_app.state.parent_app = main_app
+                candidate_apps[server_name] = sub_app
 
             if servers_to_remove:
-                logger.info(f"Removing servers: {list(servers_to_remove)}")
-                unmount_servers(main_app, path_prefix, list(servers_to_remove))
-
-            servers_to_update = []
-            for server_name in servers_to_check:
-                old_cfg = old_config_data["mcpServers"][server_name]
-                new_cfg = new_config_data["mcpServers"][server_name]
-                if old_cfg != new_cfg:
-                    servers_to_update.append(server_name)
+                logger.info("Removing servers: %s", servers_to_remove)
+                await unmount_servers(
+                    main_app,
+                    path_prefix,
+                    servers_to_remove,
+                )
 
             if servers_to_update:
-                logger.info(f"Updating servers: {servers_to_update}")
-                unmount_servers(main_app, path_prefix, servers_to_update)
-                servers_to_add.update(servers_to_update)
+                logger.info("Updating servers: %s", servers_to_update)
+                await unmount_servers(
+                    main_app,
+                    path_prefix,
+                    servers_to_update,
+                )
 
-            if servers_to_add:
-                logger.info(f"Adding servers: {list(servers_to_add)}")
+            if activation_names:
+                logger.info("Adding or updating servers: %s", activation_names)
 
-                # Track lifespan contexts for dynamically added sub-apps
-                if not hasattr(main_app.state, 'active_lifespans'):
-                    main_app.state.active_lifespans = {}
+            for server_name in activation_names:
+                server_cfg = new_servers[server_name]
+                if (
+                    isinstance(server_cfg, dict)
+                    and not server_cfg.get("enabled", True)
+                ):
+                    state_manager.set_server_enabled(server_name, False)
+                if not state_manager.is_server_enabled(server_name):
+                    logger.info(
+                        "Server '%s' added or updated but disabled; "
+                        "leaving it unmounted.",
+                        server_name,
+                    )
+                    continue
 
-                for server_name in servers_to_add:
-                    server_cfg = new_config_data["mcpServers"][server_name]
-                    try:
-                        sub_app = create_sub_app(
-                            server_name, server_cfg, cors_allow_origins, api_key,
-                            strict_auth, api_dependency, connection_timeout, lifespan
+                sub_app = candidate_apps.get(server_name)
+                if sub_app is None:
+                    raise RuntimeError(
+                        f"Candidate app for '{server_name}' was not prepared"
+                    )
+                main_app.mount(
+                    f"{path_prefix}{server_name}",
+                    sub_app,
+                )
+                current_state = state_manager.get_server_state(server_name)
+                state_manager.set_server_enabled(
+                    server_name,
+                    current_state.get("enabled", True),
+                )
+
+                try:
+                    runtime = await spawn_server_runtime(
+                        main_app,
+                        server_name,
+                        sub_app,
+                        api_dependency=api_dependency,
+                    )
+                    if runtime.connected:
+                        logger.info(
+                            "Successfully connected to new server: '%s'",
+                            server_name,
                         )
-                        sub_app.state.parent_app = main_app
-                        main_app.mount(f"{path_prefix}{server_name}", sub_app)
-                        # Ensure state manager tracks the server so UI reflects it immediately
-                        try:
-                            current_state = state_manager.get_server_state(server_name)
-                            state_manager.set_server_enabled(server_name, current_state.get("enabled", True))
-                        except Exception as state_err:  # pragma: no cover - defensive
-                            logger.warning(f"Failed to persist state for server '{server_name}': {state_err}")
-
-                        # Start lifespan for newly mounted sub-app and track for cleanup
-                        try:
-                            lifespan_context = sub_app.router.lifespan_context(sub_app)
-                            await lifespan_context.__aenter__()
-                            main_app.state.active_lifespans[server_name] = lifespan_context
-                            is_connected = getattr(sub_app.state, "is_connected", False)
-                            if is_connected:
-                                logger.info(f"Successfully connected to new server: '{server_name}'")
-                                sub_app.state.last_error = None
-                            else:
-                                logger.warning(f"Failed to connect to new server: '{server_name}'")
-                        except Exception as init_err:  # pragma: no cover - defensive
-                            sub_app.state.is_connected = False
-                            sub_app.state.last_error = str(init_err)
-                            logger.error(
-                                f"Failed to initialize server '{server_name}': {init_err}. "
-                                "Server remains mounted but marked disconnected."
-                            )
-                    except Exception as e:
-                        logger.error(f"Failed to create server '{server_name}': {e}")
-                        main_app.router.routes = backup_routes
-                        raise
+                        sub_app.state.last_error = None
+                    else:
+                        logger.warning(
+                            "Failed to connect to new server: '%s'",
+                            server_name,
+                        )
+                        sub_app.state.last_error = runtime.last_error
+                except Exception as init_err:  # pragma: no cover - defensive
+                    sub_app.state.is_connected = False
+                    sub_app.state.last_error = str(init_err)
+                    logger.error(
+                        "Failed to initialize server '%s': %s. "
+                        "Server remains mounted but marked disconnected.",
+                        server_name,
+                        init_err,
+                    )
 
             main_app.state.config_data = new_config_data
             _health_state["generation"] += 1
-            _health_state["last_reload"] = datetime.now(timezone.utc).isoformat()
+            _health_state["last_reload"] = datetime.now(
+                timezone.utc
+            ).isoformat()
             _update_health_snapshot(main_app)
+            main_app.state.aggregate_openapi_dirty = True
             logger.info("Config reload completed successfully")
-        except Exception as e:
-            logger.error(f"Error during config reload, keeping previous configuration: {e}")
-            main_app.router.routes = backup_routes
+        except Exception as update_error:
+            logger.error(
+                "Error during config reload, restoring previous generation: %s",
+                update_error,
+            )
+            try:
+                await _restore_reload_snapshot(
+                    main_app,
+                    old_config_data=old_config_data,
+                    backup_routes=backup_routes,
+                    affected_names=affected_names,
+                    previous_runtimes=previous_runtimes,
+                    previous_runtime_alive=previous_runtime_alive,
+                    previous_runtime_connected=previous_runtime_connected,
+                    previous_server_enabled=previous_server_enabled,
+                    state_manager=state_manager,
+                )
+            except Exception as rollback_error:
+                raise ConfigRollbackError(
+                    update_error,
+                    rollback_error,
+                ) from update_error
             raise
 
 
-async def initialize_sub_app(sub_app: FastAPI):
-    """Initialize a mounted sub-app by establishing an MCP session and creating tool endpoints.
+class ConfigRollbackError(RuntimeError):
+    """Configuration activation failed and the previous state could not be restored."""
 
-    Mirrors the logic inside the lifespan branch for sub-apps but callable on-demand
-    after dynamic (re)mounts.
+    def __init__(self, update_error: Exception, rollback_error: Exception):
+        self.update_error = update_error
+        self.rollback_error = rollback_error
+        super().__init__(
+            f"update failed: {update_error}; rollback failed: {rollback_error}"
+        )
+
+
+async def _restore_reload_snapshot(
+    main_app: FastAPI,
+    *,
+    old_config_data: Dict[str, Any],
+    backup_routes: list,
+    affected_names: list[str],
+    previous_runtimes: Dict[str, Any],
+    previous_runtime_alive: set[str],
+    previous_runtime_connected: Dict[str, bool],
+    previous_server_enabled: Dict[str, bool],
+    state_manager: Any,
+) -> None:
+    """Restore the exact prior route/runtime generation after a partial reload."""
+    affected_set = set(affected_names)
+    main_app.state.config_data = old_config_data
+    main_app.router.routes[:] = [
+        route
+        for route in main_app.router.routes
+        if not (
+            isinstance(route, Mount)
+            and _server_name_from_mount(route) in affected_set
+        )
+    ]
+    runtime_registry = _get_server_runtimes(main_app)
+    replacement_routes: Dict[str, Mount] = {}
+    compensation_runtime_names: list[str] = []
+
+    try:
+        for server_name in affected_names:
+            previous_runtime = previous_runtimes.get(server_name)
+            current_runtime = runtime_registry.get(server_name)
+            previous_was_alive = server_name in previous_runtime_alive
+            previous_was_connected = previous_runtime_connected.get(
+                server_name,
+                False,
+            )
+            prior_runtime_retained = (
+                current_runtime is previous_runtime
+                and previous_was_alive
+                and _runtime_is_alive(current_runtime)
+                and (
+                    not previous_was_connected
+                    or bool(getattr(current_runtime, "connected", False))
+                )
+            )
+            if prior_runtime_retained:
+                continue
+
+            if current_runtime is not None:
+                teardown_result = await teardown_server_runtime(
+                    main_app,
+                    server_name,
+                )
+                if not teardown_result.get("ok", True):
+                    error = (
+                        teardown_result.get("error")
+                        or "unknown teardown error"
+                    )
+                    raise RuntimeError(
+                        f"Rollback teardown for '{server_name}' failed: {error}"
+                    )
+
+        if state_manager is not None:
+            for server_name, was_enabled in previous_server_enabled.items():
+                if state_manager.is_server_enabled(server_name) != was_enabled:
+                    state_manager.set_server_enabled(
+                        server_name,
+                        was_enabled,
+                    )
+
+        for server_name in affected_names:
+            previous_runtime = previous_runtimes.get(server_name)
+            current_runtime = runtime_registry.get(server_name)
+            if (
+                current_runtime is previous_runtime
+                and server_name in previous_runtime_alive
+                and _runtime_is_alive(current_runtime)
+                and (
+                    not previous_runtime_connected.get(server_name, False)
+                    or bool(getattr(current_runtime, "connected", False))
+                )
+            ):
+                continue
+            if server_name not in previous_runtime_alive:
+                continue
+
+            old_routes = [
+                route
+                for route in backup_routes
+                if isinstance(route, Mount)
+                and _server_name_from_mount(route) == server_name
+            ]
+            if not old_routes:
+                raise RuntimeError(
+                    f"Previous route for server '{server_name}' is missing"
+                )
+
+            sub_app = _create_configured_server_app(main_app, server_name)
+            if sub_app is None:
+                raise RuntimeError(
+                    f"Cannot reconstruct previous server '{server_name}'"
+                )
+            restored_runtime = await spawn_server_runtime(
+                main_app,
+                server_name,
+                sub_app,
+                api_dependency=getattr(
+                    main_app.state,
+                    "api_dependency",
+                    None,
+                ),
+            )
+            compensation_runtime_names.append(server_name)
+            if (
+                not _runtime_is_alive(restored_runtime)
+                or (
+                    previous_runtime_connected.get(server_name, False)
+                    and not bool(
+                        getattr(restored_runtime, "connected", False)
+                    )
+                )
+            ):
+                raise RuntimeError(
+                    getattr(restored_runtime, "last_error", None)
+                    or f"Failed to reconnect previous server '{server_name}'"
+                )
+
+            old_route = old_routes[0]
+            replacement_routes[server_name] = Mount(
+                old_route.path,
+                app=sub_app,
+                name=getattr(old_route, "name", None),
+            )
+
+        restored_routes = []
+        emitted_replacements: set[str] = set()
+        for route in backup_routes:
+            if isinstance(route, Mount):
+                server_name = _server_name_from_mount(route)
+                replacement = replacement_routes.get(server_name)
+                if replacement is not None:
+                    if server_name not in emitted_replacements:
+                        restored_routes.append(replacement)
+                        emitted_replacements.add(server_name)
+                    continue
+            restored_routes.append(route)
+        main_app.router.routes[:] = restored_routes
+    except Exception:
+        for server_name in reversed(compensation_runtime_names):
+            try:
+                await teardown_server_runtime(main_app, server_name)
+            except Exception:
+                logger.error(
+                    "Failed to clean compensation runtime '%s'",
+                    server_name,
+                    exc_info=True,
+                )
+        raise
+
+def _read_config_file_snapshot(config_path: str) -> Optional[bytes]:
+    try:
+        return Path(config_path).read_bytes()
+    except FileNotFoundError:
+        return None
+
+
+def _atomic_write_config(config_path: str, content: str) -> None:
+    """Replace a config file only after its complete contents reach disk."""
+    destination = Path(config_path)
+    fd, temp_path = tempfile.mkstemp(
+        dir=str(destination.parent),
+        prefix=f".{destination.name}.",
+        suffix=".tmp",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            fd = -1
+            temp_file.write(content)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
+        os.replace(temp_path, destination)
+    except Exception:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            Path(temp_path).unlink(missing_ok=True)
+        except OSError as cleanup_error:
+            logger.warning(
+                "Failed to remove temporary config file '%s': %s",
+                temp_path,
+                cleanup_error,
+            )
+        raise
+
+
+async def _reload_config_with_rollback(
+    main_app: FastAPI,
+    new_config_data: Dict[str, Any],
+    previous_config_data: Dict[str, Any],
+    config_path: str,
+    previous_file_bytes: Optional[bytes],
+) -> None:
+    """Activate persisted config, restoring file and runtime if activation fails."""
+    handler_committed = False
+    try:
+        await reload_config_handler(main_app, new_config_data)
+        handler_committed = True
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+    except Exception as update_error:
+        try:
+            path = Path(config_path)
+            if previous_file_bytes is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(previous_file_bytes)
+        except Exception as file_rollback_error:
+            raise ConfigRollbackError(
+                update_error,
+                file_rollback_error,
+            ) from update_error
+
+        if not handler_committed:
+            raise
+
+        try:
+            await reload_config_handler(
+                main_app,
+                deepcopy(previous_config_data),
+            )
+            await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+        except Exception as rollback_error:
+            raise ConfigRollbackError(
+                update_error,
+                rollback_error,
+            ) from update_error
+        raise
+
+@dataclass
+class ServerRuntime:
+    """Owns one MCP server's live connection: the transport, the ClientSession, and
+    the background task that holds both open until asked to stop.
+
+    One instance covers a server regardless of whether it was mounted from the
+    initial config or added later (add-server, reload, reinit). There is a single
+    registry (``main_app.state.server_runtimes``) covering both origins, not a
+    separate mechanism per origin.
+    """
+    name: str
+    task: Optional[asyncio.Task] = None
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    ready_event: asyncio.Event = field(default_factory=asyncio.Event)
+    session: Optional[ClientSession] = None
+    connected: bool = False
+    last_error: Optional[str] = None
+
+
+def _get_server_runtimes(main_app: FastAPI) -> Dict[str, "ServerRuntime"]:
+    if not hasattr(main_app.state, "server_runtimes"):
+        main_app.state.server_runtimes = {}
+    return main_app.state.server_runtimes
+
+
+def _runtime_is_alive(runtime: Optional["ServerRuntime"]) -> bool:
+    task = getattr(runtime, "task", None)
+    return task is not None and not task.done()
+
+
+def _fastmcp_proxy_is_initialized(main_app: FastAPI) -> bool:
+    """Return whether this app has ever mounted its in-process native proxy."""
+    if hasattr(main_app.state, "fastmcp_proxy_mounts"):
+        return True
+    if hasattr(main_app.state, "fastmcp_proxy_lifespans"):
+        return True
+    return any(
+        bool(
+            getattr(
+                getattr(getattr(route, "app", None), "state", None),
+                "is_fastmcp_proxy",
+                False,
+            )
+        )
+        for route in main_app.router.routes
+    )
+
+
+async def _sync_initialized_fastmcp_proxy(main_app: FastAPI) -> None:
+    """Rebuild native MCP mounts only when that optional surface is active."""
+    if _fastmcp_proxy_is_initialized(main_app):
+        await _mount_or_remount_fastmcp(main_app, base_path="/mcp")
+
+
+async def _reload_runtime_surfaces_with_rollback(
+    main_app: FastAPI,
+    new_config_data: Dict[str, Any],
+) -> None:
+    """Activate an external file edit without rewriting that external source."""
+    previous_config_data = deepcopy(
+        getattr(main_app.state, "config_data", {"mcpServers": {}})
+    )
+    handler_committed = False
+    try:
+        await reload_config_handler(main_app, new_config_data)
+        handler_committed = True
+        await _sync_initialized_fastmcp_proxy(main_app)
+    except Exception as update_error:
+        if not handler_committed:
+            raise
+        try:
+            await reload_config_handler(
+                main_app,
+                deepcopy(previous_config_data),
+            )
+            await _sync_initialized_fastmcp_proxy(main_app)
+        except Exception as rollback_error:
+            raise ConfigRollbackError(
+                update_error,
+                rollback_error,
+            ) from update_error
+        raise
+
+async def _server_runtime_main(runtime: "ServerRuntime", sub_app: FastAPI, api_dependency) -> None:
+    """Connect, register tool endpoints, signal readiness, then hold the connection
+    open until ``runtime.stop_event`` is set.
+
+    The client context managers (which terminate the child process / transport on
+    exit) are entered and exited by this SAME task throughout, as the mcp client
+    library requires -- there is no cross-task cancel-scope violation.
+    """
+    server_type = normalize_server_type(getattr(sub_app.state, "server_type", "stdio"))
+    command = getattr(sub_app.state, "command", None)
+    args = getattr(sub_app.state, "args", [])
+    args = args if isinstance(args, list) else [args]
+    env = getattr(sub_app.state, "env", {})
+    connection_timeout = getattr(sub_app.state, "connection_timeout", 10)
+
+    sub_app.state.is_connected = False
+    try:
+        if server_type == "stdio":
+            server_params = StdioServerParameters(
+                command=command,
+                args=args,
+                env={**os.environ, **env},
+            )
+            client_context = stdio_client(server_params)
+        elif server_type == "sse":
+            headers = getattr(sub_app.state, "headers", None)
+            client_context = sse_client(
+                url=args[0],
+                sse_read_timeout=connection_timeout or 900,
+                headers=headers,
+            )
+        elif server_type == "streamable-http":
+            headers = getattr(sub_app.state, "headers", None)
+            client_context = streamablehttp_client(url=args[0], headers=headers)
+        else:
+            raise ValueError(f"Unsupported server type: {server_type}")
+
+        async with client_context as (reader, writer, *_):
+            async with ClientSession(reader, writer) as session:
+                sub_app.state.session = session
+                runtime.session = session
+                await create_dynamic_endpoints(sub_app, api_dependency=api_dependency)
+                sub_app.state.is_connected = True
+                runtime.connected = True
+                runtime.last_error = None
+                runtime.ready_event.set()
+                await runtime.stop_event.wait()
+        # Both context managers have exited in this task: the transport (and, for
+        # stdio, the child process) is fully torn down here before we return.
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        runtime.connected = False
+        runtime.last_error = f"{type(e).__name__}: {e}"
+        sub_app.state.is_connected = False
+        logger.error(
+            f"Server runtime for '{runtime.name}' failed: {type(e).__name__}: {e}",
+            exc_info=True,
+        )
+    finally:
+        runtime.connected = False
+        sub_app.state.is_connected = False
+        sub_app.state.session = None
+        runtime.session = None
+        # Always unblock a waiting spawn_server_runtime call, success or failure.
+        runtime.ready_event.set()
+
+
+async def spawn_server_runtime(
+    main_app: FastAPI,
+    server_name: str,
+    sub_app: FastAPI,
+    *,
+    api_dependency=None,
+    timeout: Optional[float] = None,
+) -> "ServerRuntime":
+    """Start the persistent connection manager task for one server, or return the
+    existing one if it is already alive.
+
+    This is the single duplicate-spawn guard: callers never need to check whether a
+    server is already running before calling this -- it is safe to call repeatedly.
+    """
+    runtimes = _get_server_runtimes(main_app)
+    existing = runtimes.get(server_name)
+    if existing is not None and existing.task is not None and not existing.task.done():
+        logger.info(f"Server runtime for '{server_name}' already running; skipping duplicate spawn")
+        return existing
+
+    runtime = ServerRuntime(name=server_name)
+    runtimes[server_name] = runtime
+    raw_timeout = timeout if timeout is not None else getattr(sub_app.state, "connection_timeout", None)
+    try:
+        effective_timeout = float(raw_timeout) if raw_timeout else 30
+    except (TypeError, ValueError):
+        effective_timeout = 30
+    runtime.task = asyncio.create_task(
+        _server_runtime_main(runtime, sub_app, api_dependency),
+        name=f"mcp-server-runtime:{server_name}",
+    )
+    try:
+        await asyncio.wait_for(runtime.ready_event.wait(), timeout=effective_timeout)
+    except asyncio.TimeoutError:
+        runtime.last_error = f"Timed out waiting for '{server_name}' to connect after {effective_timeout}s"
+        logger.error(runtime.last_error)
+    return runtime
+
+
+async def teardown_server_runtime(
+    main_app: FastAPI,
+    server_name: str,
+    *,
+    timeout: float = 10.0,
+) -> Dict[str, Any]:
+    """Stop the persistent connection manager task for one server, if any.
+
+    Idempotent: tearing down a server with no active runtime is a no-op success.
+    Signals the task to stop and awaits it; if it does not exit within ``timeout``,
+    the task is cancelled and the failure is reported -- never a silent hang.
+    """
+    runtimes = _get_server_runtimes(main_app)
+    runtime = runtimes.get(server_name)
+    if runtime is None or runtime.task is None or runtime.task.done():
+        runtimes.pop(server_name, None)
+        return {"ok": True, "server": server_name, "was_running": False, "forced": False, "error": None}
+
+    runtime.stop_event.set()
+    forced = False
+    error = None
+    try:
+        await asyncio.wait_for(asyncio.shield(runtime.task), timeout=timeout)
+    except asyncio.TimeoutError:
+        forced = True
+        logger.error(f"Server runtime for '{server_name}' did not stop within {timeout}s; cancelling task")
+        runtime.task.cancel()
+        try:
+            await asyncio.wait_for(runtime.task, timeout=5.0)
+        except asyncio.CancelledError:
+            pass
+        except asyncio.TimeoutError:
+            error = f"Server runtime for '{server_name}' did not respond to cancellation; abandoning task"
+            logger.error(error)
+        except Exception as e:
+            error = f"Server runtime for '{server_name}' raised during forced cancel: {type(e).__name__}: {e}"
+            logger.error(error, exc_info=True)
+        else:
+            error = f"Teardown of '{server_name}' timed out after {timeout}s; task was force-cancelled"
+    except Exception as e:
+        error = f"Server runtime for '{server_name}' raised during teardown: {type(e).__name__}: {e}"
+        logger.error(error, exc_info=True)
+
+    if error is not None and _runtime_is_alive(runtime):
+        # A task that ignored cancellation is still live. Keep it registered so
+        # callers can restore routing without starting a duplicate child process.
+        return {"ok": False, "server": server_name, "was_running": True, "forced": forced, "error": error}
+
+    runtimes.pop(server_name, None)
+    return {"ok": error is None, "server": server_name, "was_running": True, "forced": forced, "error": error}
+
+
+async def _restore_server_after_failed_disable(
+    main_app: FastAPI,
+    server_name: str,
+    backup_routes: list,
+    removed_routes: list,
+) -> None:
+    """Restore one server with a live runtime and its original route position."""
+    current_runtime = _get_server_runtimes(main_app).get(server_name)
+    if _runtime_is_alive(current_runtime) and current_runtime.connected:
+        main_app.router.routes = backup_routes
+        return
+
+    sub_app = _create_configured_server_app(main_app, server_name)
+    if sub_app is None:
+        raise RuntimeError(f"Cannot restore missing server '{server_name}'")
+    runtime = await spawn_server_runtime(
+        main_app,
+        server_name,
+        sub_app,
+        api_dependency=getattr(main_app.state, "api_dependency", None),
+    )
+    if not runtime.connected:
+        await teardown_server_runtime(main_app, server_name)
+        raise RuntimeError(runtime.last_error or f"Failed to restore server '{server_name}'")
+
+    main_app.mount(_server_mount_path(main_app, server_name), sub_app)
+    replacement = _find_server_mounts(main_app, server_name)[-1]
+    main_app.router.routes.remove(replacement)
+    insertion_index = min(
+        (backup_routes.index(route) for route in removed_routes),
+        default=len(backup_routes),
+    )
+    restored_routes = [route for route in backup_routes if route not in removed_routes]
+    restored_routes.insert(min(insertion_index, len(restored_routes)), replacement)
+    main_app.router.routes = restored_routes
+
+
+async def initialize_sub_app(sub_app: FastAPI):
+    """Initialize a mounted sub-app by spawning its persistent connection runtime.
+
+    Callable on-demand after dynamic (re)mounts (e.g. from /_meta/reinit). Delegates
+    to spawn_server_runtime so the resulting connection is held open by a background
+    task rather than being torn down as soon as this function returns.
     """
     if getattr(sub_app.state, 'is_connected', False):
         # Already initialized
         return
-    server_type = normalize_server_type(getattr(sub_app.state, 'server_type', 'stdio'))
-    command = getattr(sub_app.state, 'command', None)
-    args = getattr(sub_app.state, 'args', [])
-    args = args if isinstance(args, list) else [args]
-    env = getattr(sub_app.state, 'env', {})
-    connection_timeout = getattr(sub_app.state, 'connection_timeout', 10)
+    main_app = getattr(sub_app.state, 'parent_app', None)
+    if main_app is None:
+        raise ValueError("initialize_sub_app requires sub_app.state.parent_app to be set")
     api_dependency = getattr(sub_app.state, 'api_dependency', None)
+    server_name = getattr(sub_app.state, 'config_key', None) or sub_app.title
     # Remove old tool endpoints if any (POST /toolName at root)
     retained = []
     for r in sub_app.router.routes:
@@ -411,34 +1200,7 @@ async def initialize_sub_app(sub_app: FastAPI):
             continue
         retained.append(r)
     sub_app.router.routes = retained
-    try:
-        if server_type == 'stdio':
-            server_params = StdioServerParameters(
-                command=command,
-                args=args,
-                env={**os.environ, **env},
-            )
-            client_context = stdio_client(server_params)
-        elif server_type == 'sse':
-            headers = getattr(sub_app.state, 'headers', None)
-            client_context = sse_client(
-                url=args[0],
-                sse_read_timeout=connection_timeout or 900,
-                headers=headers,
-            )
-        elif server_type == 'streamable-http':
-            headers = getattr(sub_app.state, 'headers', None)
-            client_context = streamablehttp_client(url=args[0], headers=headers)
-        else:
-            raise ValueError(f"Unsupported server type: {server_type}")
-        async with client_context as (reader, writer, *_):
-            async with ClientSession(reader, writer) as session:
-                sub_app.state.session = session
-                await create_dynamic_endpoints(sub_app, api_dependency=api_dependency)
-                sub_app.state.is_connected = True
-    except Exception:
-        sub_app.state.is_connected = False
-        raise
+    await spawn_server_runtime(main_app, server_name, sub_app, api_dependency=api_dependency)
 
 
 async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
@@ -447,7 +1209,7 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
         raise ValueError("Session is not initialized in the app state.")
 
     result = await session.initialize()
-    server_info = getattr(result, "serverInfo", None)
+    server_info = result.server_info
     if server_info:
         app.title = server_info.name or app.title
         app.description = (
@@ -480,8 +1242,8 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
         endpoint_name = tool.name
         endpoint_description = tool.description
 
-        inputSchema = tool.inputSchema
-        outputSchema = getattr(tool, "outputSchema", None)
+        inputSchema = tool.input_schema
+        outputSchema = getattr(tool, "output_schema", None)
 
         form_model_fields = get_model_fields(
             f"{endpoint_name}_form_model",
@@ -515,6 +1277,10 @@ async def create_dynamic_endpoints(app: FastAPI, api_dependency=None):
             dependencies=[Depends(api_dependency)] if api_dependency else [],
         )(tool_handler)
 
+    parent_app = getattr(app.state, "parent_app", None)
+    if parent_app is not None:
+        parent_app.state.aggregate_openapi_dirty = True
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -533,81 +1299,112 @@ async def lifespan(app: FastAPI):
     is_main_app = not command and not (server_type in ["sse", "streamable-http"] and args)
 
     if is_main_app:
-        async with AsyncExitStack() as stack:
-            successful_servers = []
-            failed_servers = []
+        successful_servers = []
+        failed_servers = []
+        skipped_servers = []
 
-            sub_lifespans = [
-                (route.app, route.app.router.lifespan_context(route.app))
-                for route in app.routes
-                if isinstance(route, Mount) and isinstance(route.app, FastAPI)
-            ]
+        state_manager = get_state_manager()
+        config_data = getattr(app.state, "config_data", {}) or {}
+        mcp_servers_cfg = config_data.get("mcpServers", {}) if isinstance(config_data, dict) else {}
+        main_api_dependency = getattr(app.state, "api_dependency", None)
+        mounted_servers = [
+            (_server_name_from_mount(route), route.app)
+            for route in app.routes
+            if isinstance(route, Mount) and isinstance(route.app, FastAPI)
+        ]
 
-            for sub_app, lifespan_context in sub_lifespans:
-                server_name = sub_app.title
-                
-                # Skip internal MCPO management server - it doesn't need MCP connection
-                if server_name == "MCPO Management Server":
-                    logger.info(f"Skipping connection for internal server: '{server_name}' (already available)")
+        for server_name, sub_app in mounted_servers:
+            # Skip internal MCPO management server - it doesn't need MCP connection
+            if sub_app.title == "MCPO Management Server":
+                logger.info(f"Skipping connection for internal server: '{server_name}' (already available)")
+                successful_servers.append(server_name)
+                continue
+
+            server_cfg = mcp_servers_cfg.get(server_name, {})
+            if isinstance(server_cfg, dict) and not server_cfg.get("enabled", True):
+                # Config-level disable always wins; keep persisted state in sync.
+                state_manager.set_server_enabled(server_name, False)
+
+            if not state_manager.is_server_enabled(server_name):
+                logger.info(f"Skipping connection for disabled server: '{server_name}'")
+                sub_app.state.is_connected = False
+                sub_app.state.last_error = "Server disabled"
+                skipped_servers.append(server_name)
+                continue
+
+            logger.info(f"Initiating connection for server: '{server_name}'...")
+            try:
+                runtime = await spawn_server_runtime(
+                    app, server_name, sub_app, api_dependency=main_api_dependency
+                )
+                if runtime.connected:
+                    logger.info(f"Successfully connected to '{server_name}'.")
                     successful_servers.append(server_name)
-                    continue
-                
-                logger.info(f"Initiating connection for server: '{server_name}'...")
-                try:
-                    await stack.enter_async_context(lifespan_context)
-                    is_connected = getattr(sub_app.state, "is_connected", False)
-                    if is_connected:
-                        logger.info(f"Successfully connected to '{server_name}'.")
-                        successful_servers.append(server_name)
-                    else:
-                        logger.warning(
-                            f"Connection attempt for '{server_name}' finished, but status is not 'connected'."
-                        )
-                        failed_servers.append(server_name)
-                except Exception as e:
-                    error_class_name = type(e).__name__
-                    if error_class_name == 'ExceptionGroup' or (hasattr(e, 'exceptions') and hasattr(e, 'message')):
-                        logger.error(
-                            f"Failed to establish connection for server: '{server_name}' - Multiple errors occurred:"
-                        )
-                        # Log each individual exception from the group
-                        exceptions = getattr(e, 'exceptions', [])
-                        for idx, exc in enumerate(exceptions):
-                            logger.error(f"  Error {idx + 1}: {type(exc).__name__}: {exc}")
-                            # Also log traceback for each exception
-                            if hasattr(exc, '__traceback__'):
-                                import traceback
-                                tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
-                                for line in tb_lines:
-                                    logger.debug(f"    {line.rstrip()}")
-                    else:
-                        logger.error(
-                            f"Failed to establish connection for server: '{server_name}' - {type(e).__name__}: {e}",
-                            exc_info=True
-                        )
+                    sub_app.state.last_error = None
+                else:
+                    logger.warning(
+                        f"Connection attempt for '{server_name}' finished, but status is not 'connected'."
+                    )
+                    sub_app.state.last_error = runtime.last_error
                     failed_servers.append(server_name)
+            except Exception as e:
+                error_class_name = type(e).__name__
+                if error_class_name == 'ExceptionGroup' or (hasattr(e, 'exceptions') and hasattr(e, 'message')):
+                    logger.error(
+                        f"Failed to establish connection for server: '{server_name}' - Multiple errors occurred:"
+                    )
+                    # Log each individual exception from the group
+                    exceptions = getattr(e, 'exceptions', [])
+                    for idx, exc in enumerate(exceptions):
+                        logger.error(f"  Error {idx + 1}: {type(exc).__name__}: {exc}")
+                        # Also log traceback for each exception
+                        if hasattr(exc, '__traceback__'):
+                            import traceback
+                            tb_lines = traceback.format_exception(type(exc), exc, exc.__traceback__)
+                            for line in tb_lines:
+                                logger.debug(f"    {line.rstrip()}")
+                else:
+                    logger.error(
+                        f"Failed to establish connection for server: '{server_name}' - {type(e).__name__}: {e}",
+                        exc_info=True
+                    )
+                failed_servers.append(server_name)
 
-            logger.info("\n--- Server Startup Summary ---")
-            if successful_servers:
-                logger.info("Successfully connected to:")
-                for name in successful_servers:
-                    logger.info(f"  - {name}")
-                app.description += "\n\n- **available tools**："
-                for name in successful_servers:
-                    docs_path = urljoin(path_prefix, f"{name}/docs")
-                    app.description += f"\n    - [{name}]({docs_path})"
-            if failed_servers:
-                logger.warning("Failed to connect to:")
-                for name in failed_servers:
-                    logger.warning(f"  - {name}")
-            logger.info("--------------------------\n")
+        logger.info("\n--- Server Startup Summary ---")
+        if successful_servers:
+            logger.info("Successfully connected to:")
+            for name in successful_servers:
+                logger.info(f"  - {name}")
+            app.description += "\n\n- **available tools**："
+            for name in successful_servers:
+                docs_path = urljoin(path_prefix, f"{name}/docs")
+                app.description += f"\n    - [{name}]({docs_path})"
+        if failed_servers:
+            logger.warning("Failed to connect to:")
+            for name in failed_servers:
+                logger.warning(f"  - {name}")
+        if skipped_servers:
+            logger.info("Skipped (disabled):")
+            for name in skipped_servers:
+                logger.info(f"  - {name}")
+        logger.info("--------------------------\n")
 
-            if not successful_servers:
-                logger.error("No MCP servers could be reached.")
+        if not successful_servers:
+            logger.error("No MCP servers could be reached.")
 
+        try:
             yield
-            # The AsyncExitStack will handle the graceful shutdown of all servers
-            # when the 'with' block is exited.
+        finally:
+            # Tear down every server runtime (config-initial and dynamic alike) so no
+            # child process outlives this process.
+            for name in list(_get_server_runtimes(app).keys()):
+                result = await teardown_server_runtime(app, name)
+                if not result.get("ok", True):
+                    logger.error(
+                        f"Shutdown teardown for '{name}' reported an error: {result.get('error')}"
+                    )
+            # Serialize native proxy shutdown with config watchers and remount calls.
+            await _shutdown_fastmcp_proxy(app)
     else:
         # This is a sub-app's lifespan
         app.state.is_connected = False
@@ -652,7 +1449,8 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         title="MCPO Management Server",
         description="Internal MCP server exposing MCPO management capabilities",
         version="1.0",
-        servers=[{"url": "/mcpo"}]
+        servers=[{"url": "/mcpo"}],
+        dependencies=[Depends(api_dependency)] if api_dependency else [],
     )
     # Request models for clear OpenAPI requestBody schemas
     class PostConfigBody(BaseModel):
@@ -670,6 +1468,15 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
     
     # Store reference to main app for accessing state
     mcpo_app.state.main_app = main_app
+
+    def _internal_read_only() -> bool:
+        return bool(getattr(mcpo_app.state.main_app.state, "read_only_mode", False))
+
+    def _read_only_error() -> JSONResponse:
+        return JSONResponse(
+            status_code=403,
+            content=error_envelope("Read-only mode enabled", code="read_only"),
+        )
 
     @mcpo_app.post(
         "/install_python_package",
@@ -694,10 +1501,8 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
     )
     async def install_python_package(request: Request, body: InstallPythonPackageBody):
         """Install a Python package using pip."""
-        # Block in read-only mode
-        main_app = request.app
-        if getattr(main_app.state, 'read_only_mode', False):
-            return JSONResponse(status_code=403, content={"ok": False, "error": {"message": "Read-only mode"}})
+        if _internal_read_only():
+            return _read_only_error()
         try:
             package_name = body.package_name if body else None
             if not package_name or not isinstance(package_name, str):
@@ -812,41 +1617,91 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         },
     )
     async def post_config(request: Request, body: PostConfigBody):
-        """Update MCPO configuration."""
+        """Update MCPO configuration through the shared activation transaction."""
+        if _internal_read_only():
+            return _read_only_error()
+        main_app = mcpo_app.state.main_app
+        config_path = getattr(main_app.state, "config_path", None)
+        if not config_path:
+            return JSONResponse(
+                status_code=400,
+                content=error_envelope("No config file configured", code="no_config"),
+            )
+
+        raw_config = body.config
+        if raw_config is None:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Missing config data", code="invalid"),
+            )
         try:
-            main_app = mcpo_app.state.main_app
-            config_path = getattr(main_app.state, 'config_path', None)
-            if not config_path:
-                return JSONResponse(status_code=400, content={"ok": False, "error": {"message": "No config file configured"}})
-            
-            config_data = body.config
-            if not config_data:
-                return JSONResponse(status_code=422, content={"ok": False, "error": {"message": "Missing config data"}})
-            
-            # Validate JSON
-            if isinstance(config_data, str):
-                config_data = json.loads(config_data)
-            
-            # Backup existing config
-            backup_path = f"{config_path}.backup"
+            if isinstance(raw_config, str):
+                raw_config = json.loads(raw_config)
+            config_data = validate_config_data(raw_config)
+        except json.JSONDecodeError as exc:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Invalid JSON", data=str(exc), code="invalid"),
+            )
+        except ValueError as exc:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope(str(exc), code="invalid"),
+            )
+
+        previous_config_data = deepcopy(
+            getattr(main_app.state, "config_data", {"mcpServers": {}})
+        )
+        previous_file_bytes = _read_config_file_snapshot(config_path)
+        backup_path = f"{config_path}.backup"
+        try:
             if os.path.exists(config_path):
                 import shutil
+
                 shutil.copy2(config_path, backup_path)
-            
-            # Save new config
-            with open(config_path, 'w') as f:
-                json.dump(config_data, f, indent=2)
-            
-            # Trigger reload
-            await reload_config_handler(main_app, config_data)
-            
-            return {"ok": True, "message": "Configuration updated and reloaded", "backup": backup_path}
-            
-        except json.JSONDecodeError as e:
-            return JSONResponse(status_code=422, content={"ok": False, "error": {"message": f"Invalid JSON: {str(e)}"}})
-        except Exception as e:
-            return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to update config: {str(e)}"}})
-    
+            _atomic_write_config(config_path, json.dumps(raw_config, indent=2))
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Failed to write config", data=str(exc), code="io_error"
+                ),
+            )
+
+        try:
+            await _reload_config_with_rollback(
+                main_app,
+                config_data,
+                previous_config_data,
+                config_path,
+                previous_file_bytes,
+            )
+        except ConfigRollbackError as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Configuration update and rollback failed",
+                    data={
+                        "update": str(exc.update_error),
+                        "rollback": str(exc.rollback_error),
+                    },
+                    code="rollback_failed",
+                ),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Reload failed", data=str(exc), code="reload_failed"
+                ),
+            )
+
+        main_app.state.aggregate_openapi_dirty = True
+        return {
+            "ok": True,
+            "message": "Configuration updated and reloaded",
+            "backup": backup_path,
+        }
     @mcpo_app.get(
         "/get_logs",
         summary="Get Server Logs",
@@ -890,6 +1745,8 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
     )
     async def post_env(request: Request, body: PostEnvBody):
         """Update .env file with environment variables."""
+        if _internal_read_only():
+            return _read_only_error()
         try:
             env_vars = body.env_vars
             if not env_vars or not isinstance(env_vars, dict):
@@ -946,6 +1803,8 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
     )
     async def validate_and_install(request: Request, form_data: Dict[str, Any]):
         """Validate configuration and install dependencies."""
+        if _internal_read_only():
+            return _read_only_error()
         try:
             logger.info("validate_and_install: Starting validation and dependency installation")
             
@@ -1079,6 +1938,8 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
         },
     )
     async def post_requirements(request: Request, body: PostRequirementsBody):
+        if _internal_read_only():
+            return _read_only_error()
         try:
             content = body.content
             if content is None or not isinstance(content, str):
@@ -1119,18 +1980,13 @@ async def create_internal_mcpo_server(main_app: FastAPI, api_dependency) -> Fast
                 if cfg_path and os.path.exists(cfg_path):
                     new_config = load_config(cfg_path)
                     await reload_config_handler(main, new_config)
+                    main.state.aggregate_openapi_dirty = True
             except Exception as e:
                 logger.warning("Reload after requirements install failed: %s", e)
 
             return {"ok": True, "message": "Requirements installed and servers reloaded", "packages": packages}
         except Exception as e:
             return JSONResponse(status_code=500, content={"ok": False, "error": {"message": f"Failed to process requirements: {str(e)}"}})
-    
-    # Add API key protection if main app has it
-    if api_dependency:
-        for route in mcpo_app.routes:
-            if hasattr(route, 'dependencies'):
-                route.dependencies.append(Depends(api_dependency))
     
     return mcpo_app
 
@@ -1222,6 +2078,7 @@ async def build_main_app(
         ssl_keyfile=ssl_keyfile,
         lifespan=lifespan,
         openapi_version="3.1.0",
+        dependencies=[Depends(api_dependency)] if api_dependency else [],
     )
     # Mount admin router for utility endpoints (e.g., /_meta/env)
     try:
@@ -1233,6 +2090,14 @@ async def build_main_app(
         main_app.include_router(chat_router, prefix="/chat")
     except Exception:
         logger.exception("Failed to include chat router")
+    try:
+        main_app.include_router(providers_router, prefix="/chat")
+    except Exception:
+        logger.exception("Failed to include providers router")
+    try:
+        main_app.include_router(model_api_keys_router, prefix="/chat")
+    except Exception:
+        logger.exception("Failed to include model API key router")
     try:
         main_app.include_router(completions_router, prefix="")
     except Exception:
@@ -1248,6 +2113,8 @@ async def build_main_app(
         "per_tool": {},  # tool_name -> stats dict
     }
     main_app.state.config_path = config_path  # Store for state persistence
+    main_app.state.api_key = api_key
+    main_app.state.model_api_key_store = get_model_api_key_store()
     main_app.state.read_only_mode = read_only_mode
     main_app.state.protocol_version_mode = protocol_version_mode
     main_app.state.validate_output_mode = validate_output_mode
@@ -1260,6 +2127,18 @@ async def build_main_app(
     main_app.state.mcp_proxy_url = proxy_url
 
     # Standardized error handlers
+    @main_app.exception_handler(StateSaveError)
+    async def state_save_exception_handler(request: Request, exc: StateSaveError):  # type: ignore
+        logger.error("Control state persistence failed: %s", exc)
+        return JSONResponse(
+            status_code=500,
+            content=error_envelope(
+                "Failed to persist control state",
+                data=str(exc),
+                code="state_save_failed",
+            ),
+        )
+
     @main_app.exception_handler(Exception)
     async def generic_exception_handler(request: Request, exc: Exception):  # type: ignore
         logger.error(f"Unhandled exception: {exc}")
@@ -1296,6 +2175,10 @@ async def build_main_app(
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    main_app.add_middleware(PackageArchiveBodyLimitMiddleware)
+    main_app.add_middleware(ConfigTransactionMiddleware)
+    main_app.add_middleware(ChatBodyLimitMiddleware)
+    main_app.add_middleware(ModelAPIKeyMiddleware, api_key=api_key)
 
     # Store tool timeout in app state for handler usage
     main_app.state.tool_timeout = tool_timeout
@@ -1322,36 +2205,44 @@ async def build_main_app(
     async def list_servers():  # noqa: D401
         _update_health_snapshot(main_app)
         state_manager = main_app.state.state_manager
-        servers = []
+        config_data = getattr(main_app.state, "config_data", {}) or {}
+        config_servers = config_data.get("mcpServers", {}) if isinstance(config_data, dict) else {}
+        servers_by_name = {}
+        for name, cfg in config_servers.items():
+            enabled = bool(state_manager.is_server_enabled(name)) and not (
+                isinstance(cfg, dict) and not cfg.get("enabled", True)
+            )
+            servers_by_name[name] = {
+                "name": name,
+                "connected": False,
+                "type": normalize_server_type((cfg or {}).get("type")) if isinstance(cfg, dict) else "unknown",
+                "basePath": f"{_server_mount_path(main_app, name).rstrip('/')}/",
+                "enabled": enabled,
+            }
         for route in main_app.router.routes:
-            if isinstance(route, Mount) and isinstance(route.app, FastAPI):
-                sub = route.app
-                # Extract config key from mount path (e.g., "/perplexity/" -> "perplexity")
-                config_key = route.path.strip('/')
-                
-                # Special handling for internal MCPO management server
-                if sub.title == "MCPO Management Server":
-                    is_connected = True  # Internal server is always "connected"
-                    server_type = "internal"
-                else:
-                    is_connected = bool(getattr(sub.state, "is_connected", False))
-                    server_type = getattr(sub.state, "server_type", "unknown")
-                
-                servers.append({
-                    "name": config_key,  # Use config key, not sub.title
-                    "connected": is_connected,
-                    "type": server_type,
-                    "basePath": route.path.rstrip('/') + '/',
-                    "enabled": state_manager.is_server_enabled(config_key),
-                })
-        return {"ok": True, "servers": servers}
-
+            if not (isinstance(route, Mount) and isinstance(route.app, FastAPI)):
+                continue
+            sub = route.app
+            config_key = _server_name_from_mount(route)
+            if sub.title == "MCPO Management Server":
+                servers_by_name[config_key] = {
+                    "name": config_key, "connected": True, "type": "internal",
+                    "basePath": route.path.rstrip('/') + '/', "enabled": True,
+                }
+                continue
+            if config_key not in config_servers:
+                continue
+            entry = servers_by_name[config_key]
+            entry["connected"] = bool(getattr(sub.state, "is_connected", False))
+            entry["type"] = getattr(sub.state, "server_type", entry["type"])
+            entry["basePath"] = route.path.rstrip('/') + '/'
+        return {"ok": True, "servers": list(servers_by_name.values())}
     @main_app.get("/_meta/servers/{server_name}/tools")
     async def list_server_tools(server_name: str):  # noqa: D401
         state_manager = main_app.state.state_manager
         # Find mounted server
-        for route in main_app.router.routes:
-            if isinstance(route, Mount) and isinstance(route.app, FastAPI) and route.path.rstrip('/') == f"/{server_name}":
+        for route in _find_server_mounts(main_app, server_name):
+            if isinstance(route.app, FastAPI):
                 sub = route.app
                 tools = []
                 for r in sub.router.routes:
@@ -1389,7 +2280,7 @@ async def build_main_app(
         tools: Dict[str, List[str]] = {}
         for route in main_app.router.routes:
             if isinstance(route, Mount) and isinstance(route.app, FastAPI):
-                mount_name = route.path.strip('/')
+                mount_name = _server_name_from_mount(route)
                 if mount_name not in server_names:
                     continue
                 sub_app = route.app
@@ -1402,6 +2293,39 @@ async def build_main_app(
                 tools[mount_name] = sorted(collected)
 
         return {"ok": True, "tools": tools}
+
+    @main_app.get("/_meta/stats")
+    async def get_stats():  # noqa: D401
+        """Basic server stats for UI (uptime, version)."""
+        import time as _time
+        start_ts = getattr(main_app.state, "start_time", None)
+        if start_ts is None:
+            start_ts = _time.time()
+            main_app.state.start_time = start_ts
+        uptime_s = _time.time() - start_ts
+        version_val = getattr(main_app, "version", None) or MCP_VERSION
+        return {"ok": True, "uptimeSeconds": uptime_s, "version": version_val}
+
+    @main_app.get("/_meta/status")
+    async def get_status():  # noqa: D401
+        """Get overall server status."""
+        _update_health_snapshot(main_app)
+        servers_count = 0
+        connected_count = 0
+        for route in main_app.router.routes:
+            if isinstance(route, Mount) and isinstance(route.app, FastAPI):
+                servers_count += 1
+                if getattr(route.app.state, "is_connected", False):
+                    connected_count += 1
+        return {
+            "ok": True,
+            "status": "running",
+            "servers": {
+                "total": servers_count,
+                "connected": connected_count,
+                "disconnected": servers_count - connected_count,
+            },
+        }
 
     @main_app.get("/_meta/config")
     async def config_info():  # noqa: D401
@@ -1471,49 +2395,372 @@ async def build_main_app(
             return JSONResponse(status_code=400, content=error_envelope("No config-driven servers active", code="no_config"))
         try:
             new_config = load_config(path)
-            await reload_config_handler(main_app, new_config)
+            await _reload_runtime_surfaces_with_rollback(main_app, new_config)
+            main_app.state.aggregate_openapi_dirty = True
             return {"ok": True, "generation": _health_state["generation"], "lastReload": _health_state["last_reload"]}
         except Exception as e:  # pragma: no cover - defensive
             return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
 
     @main_app.post("/_meta/reinit/{server_name}")
     async def reinit_server(server_name: str):  # noqa: D401
-        """Tear down and reinitialize a single mounted server session (dynamic reconnect)."""
-        if getattr(main_app.state, 'read_only_mode', False):
-            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        for route in main_app.router.routes:
-            if isinstance(route, Mount) and isinstance(route.app, FastAPI) and route.path.rstrip('/') == f"/{server_name}":
-                sub = route.app
+        """Tear down and reinitialize one mounted server session."""
+        if getattr(main_app.state, "read_only_mode", False):
+            return JSONResponse(
+                status_code=403,
+                content=error_envelope(
+                    "Read-only mode enabled",
+                    code="read_only",
+                ),
+            )
+
+        async with _reload_lock:
+            for route in _find_server_mounts(main_app, server_name):
+                if not isinstance(route.app, FastAPI):
+                    continue
+                sub_app = route.app
                 try:
-                    if hasattr(sub.state, 'session'):
-                        try:
-                            sess = getattr(sub.state, 'session')
-                            if hasattr(sess, 'close'):
-                                await sess.close()  # type: ignore
-                        except Exception:  # pragma: no cover
-                            pass
-                    sub.state.is_connected = False
-                    await initialize_sub_app(sub)
-                    return {"ok": True, "server": server_name, "connected": bool(getattr(sub.state, 'is_connected', False))}
-                except Exception as e:  # pragma: no cover
-                    return JSONResponse(status_code=500, content=error_envelope("Reinit failed", data=str(e), code="reinit_failed"))
-        return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
+                    teardown_result = await teardown_server_runtime(
+                        main_app,
+                        server_name,
+                    )
+                    if not teardown_result.get("ok", True):
+                        error = (
+                            teardown_result.get("error")
+                            or "unknown teardown error"
+                        )
+                        logger.error(
+                            "Reinit teardown for '%s' failed: %s",
+                            server_name,
+                            error,
+                        )
+                        return JSONResponse(
+                            status_code=502,
+                            content=error_envelope(
+                                "Server teardown failed",
+                                data=error,
+                                code="teardown_failed",
+                            ),
+                        )
+                    sub_app.state.is_connected = False
+                    await initialize_sub_app(sub_app)
+                    main_app.state.aggregate_openapi_dirty = True
+                    return {
+                        "ok": True,
+                        "server": server_name,
+                        "connected": bool(
+                            getattr(sub_app.state, "is_connected", False)
+                        ),
+                    }
+                except Exception as exc:  # pragma: no cover
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope(
+                            "Reinit failed",
+                            data=str(exc),
+                            code="reinit_failed",
+                        ),
+                    )
+        return JSONResponse(
+            status_code=404,
+            content=error_envelope(
+                "Server not found",
+                code="not_found",
+            ),
+        )
 
     @main_app.post("/_meta/servers/{server_name}/enable")
     async def enable_server(server_name: str):
-        if getattr(main_app.state, 'read_only_mode', False):
+        if getattr(main_app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        state_manager = main_app.state.state_manager
-        state_manager.set_server_enabled(server_name, True)
-        return {"ok": True, "server": server_name, "enabled": True}
+        async with _reload_lock:
+            state_manager = main_app.state.state_manager
+            config_data = getattr(main_app.state, "config_data", {}) or {}
+            server_cfg = (
+                config_data.get("mcpServers", {}) if isinstance(config_data, dict) else {}
+            ).get(server_name)
+            if not isinstance(server_cfg, dict):
+                return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
+            if not server_cfg.get("enabled", True):
+                return JSONResponse(status_code=409, content=error_envelope("Server disabled in config", code="config_disabled"))
+
+            previous_enabled = state_manager.is_server_enabled(server_name)
+            try:
+                if not previous_enabled:
+                    state_manager.set_server_enabled(server_name, True)
+            except StateSaveError as exc:
+                return JSONResponse(
+                    status_code=500,
+                    content=error_envelope(
+                        "Failed to persist server state",
+                        data=str(exc),
+                        code="state_save_failed",
+                    ),
+                )
+
+            current_runtime = _get_server_runtimes(main_app).get(server_name)
+            current_mounts = _find_server_mounts(main_app, server_name)
+            if (
+                _runtime_is_alive(current_runtime)
+                and current_runtime.connected
+                and current_mounts
+            ):
+                try:
+                    await _sync_initialized_fastmcp_proxy(main_app)
+                except Exception as remount_exc:
+                    try:
+                        if not previous_enabled:
+                            state_manager.set_server_enabled(server_name, False)
+                        await _sync_initialized_fastmcp_proxy(main_app)
+                    except Exception as rollback_exc:
+                        return JSONResponse(
+                            status_code=500,
+                            content=error_envelope(
+                                "Native MCP rollback failed",
+                                data={
+                                    "remount": str(remount_exc),
+                                    "rollback": str(rollback_exc),
+                                },
+                                code="state_rollback_failed",
+                            ),
+                        )
+                    return JSONResponse(
+                        status_code=502,
+                        content=error_envelope(
+                            "Native MCP remount failed",
+                            data=str(remount_exc),
+                            code="native_remount_failed",
+                        ),
+                    )
+                return {"ok": True, "server": server_name, "enabled": True, "connected": True}
+
+            backup_routes = list(main_app.router.routes)
+            had_connected_runtime = bool(
+                _runtime_is_alive(current_runtime) and current_runtime.connected
+            )
+            if _runtime_is_alive(current_runtime):
+                teardown_result = await teardown_server_runtime(main_app, server_name)
+                if not teardown_result.get("ok", True):
+                    if not previous_enabled:
+                        try:
+                            state_manager.set_server_enabled(server_name, False)
+                            await _sync_initialized_fastmcp_proxy(main_app)
+                        except Exception as rollback_exc:
+                            return JSONResponse(
+                                status_code=500,
+                                content=error_envelope(
+                                    "Server state rollback failed",
+                                    data={"activation": teardown_result.get("error"), "rollback": str(rollback_exc)},
+                                    code="state_rollback_failed",
+                                ),
+                            )
+                    return JSONResponse(status_code=502, content=error_envelope(
+                        "Server activation failed", data=teardown_result.get("error"), code="activation_failed"))
+
+            removed_routes = _remove_server_mounts(main_app, server_name)
+            sub_app = _create_configured_server_app(main_app, server_name)
+            if sub_app is None:
+                main_app.router.routes = backup_routes
+                try:
+                    if not previous_enabled:
+                        state_manager.set_server_enabled(server_name, False)
+                    await _sync_initialized_fastmcp_proxy(main_app)
+                except Exception as rollback_exc:
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope(
+                            "Server state rollback failed",
+                            data=str(rollback_exc),
+                            code="state_rollback_failed",
+                        ),
+                    )
+                return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
+
+            try:
+                runtime = await spawn_server_runtime(
+                    main_app,
+                    server_name,
+                    sub_app,
+                    api_dependency=getattr(main_app.state, "api_dependency", None),
+                )
+                if not runtime.connected:
+                    raise RuntimeError(runtime.last_error or "Server did not connect")
+            except Exception as exc:
+                await teardown_server_runtime(main_app, server_name)
+                try:
+                    if previous_enabled and had_connected_runtime:
+                        await _restore_server_after_failed_disable(
+                            main_app,
+                            server_name,
+                            backup_routes,
+                            removed_routes,
+                        )
+                    else:
+                        main_app.router.routes = backup_routes
+                    if not previous_enabled:
+                        state_manager.set_server_enabled(server_name, False)
+                    await _sync_initialized_fastmcp_proxy(main_app)
+                except Exception as rollback_exc:
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope(
+                            "Server activation rollback failed",
+                            data={"activation": str(exc), "rollback": str(rollback_exc)},
+                            code="state_rollback_failed",
+                        ),
+                    )
+                logger.error("Failed to enable server '%s': %s", server_name, exc, exc_info=True)
+                return JSONResponse(status_code=502, content=error_envelope(
+                    "Server activation failed", data=str(exc), code="activation_failed"))
+
+            main_app.mount(_server_mount_path(main_app, server_name), sub_app)
+            try:
+                await _sync_initialized_fastmcp_proxy(main_app)
+            except Exception as remount_exc:
+                await teardown_server_runtime(main_app, server_name)
+                _remove_server_mounts(main_app, server_name)
+                try:
+                    if previous_enabled and had_connected_runtime:
+                        await _restore_server_after_failed_disable(
+                            main_app,
+                            server_name,
+                            backup_routes,
+                            removed_routes,
+                        )
+                    else:
+                        main_app.router.routes = backup_routes
+                    if not previous_enabled:
+                        state_manager.set_server_enabled(server_name, False)
+                    await _sync_initialized_fastmcp_proxy(main_app)
+                except Exception as rollback_exc:
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope(
+                            "Native MCP rollback failed",
+                            data={
+                                "remount": str(remount_exc),
+                                "rollback": str(rollback_exc),
+                            },
+                            code="state_rollback_failed",
+                        ),
+                    )
+                return JSONResponse(
+                    status_code=502,
+                    content=error_envelope(
+                        "Native MCP remount failed",
+                        data=str(remount_exc),
+                        code="native_remount_failed",
+                    ),
+                )
+
+            main_app.state.aggregate_openapi_dirty = True
+            return {"ok": True, "server": server_name, "enabled": True, "connected": True}
 
     @main_app.post("/_meta/servers/{server_name}/disable")
     async def disable_server(server_name: str):
-        if getattr(main_app.state, 'read_only_mode', False):
+        if getattr(main_app.state, "read_only_mode", False):
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        state_manager = main_app.state.state_manager
-        state_manager.set_server_enabled(server_name, False)
-        return {"ok": True, "server": server_name, "enabled": False}
+        async with _reload_lock:
+            state_manager = main_app.state.state_manager
+            previous_enabled = state_manager.is_server_enabled(server_name)
+            try:
+                if previous_enabled:
+                    state_manager.set_server_enabled(server_name, False)
+            except StateSaveError as exc:
+                return JSONResponse(
+                    status_code=500,
+                    content=error_envelope(
+                        "Failed to persist server state",
+                        data=str(exc),
+                        code="state_save_failed",
+                    ),
+                )
+
+            backup_routes = list(main_app.router.routes)
+            removed_routes = _remove_server_mounts(main_app, server_name)
+            try:
+                teardown_result = await teardown_server_runtime(main_app, server_name)
+            except Exception as exc:
+                teardown_result = {"ok": False, "error": str(exc)}
+
+            if not teardown_result.get("ok", True):
+                if previous_enabled:
+                    try:
+                        await _restore_server_after_failed_disable(
+                            main_app,
+                            server_name,
+                            backup_routes,
+                            removed_routes,
+                        )
+                        state_manager.set_server_enabled(server_name, True)
+                        await _sync_initialized_fastmcp_proxy(main_app)
+                    except Exception as rollback_exc:
+                        await teardown_server_runtime(main_app, server_name)
+                        _remove_server_mounts(main_app, server_name)
+                        return JSONResponse(
+                            status_code=500,
+                            content=error_envelope(
+                                "Server disable rollback failed",
+                                data={
+                                    "teardown": teardown_result.get("error"),
+                                    "rollback": str(rollback_exc),
+                                },
+                                code="state_rollback_failed",
+                            ),
+                        )
+                return JSONResponse(status_code=502, content=error_envelope(
+                    "Server shutdown failed", data=teardown_result.get("error"), code="teardown_failed"))
+
+            try:
+                await _sync_initialized_fastmcp_proxy(main_app)
+            except Exception as remount_exc:
+                try:
+                    if previous_enabled:
+                        await _restore_server_after_failed_disable(
+                            main_app,
+                            server_name,
+                            backup_routes,
+                            removed_routes,
+                        )
+                        state_manager.set_server_enabled(server_name, True)
+                    else:
+                        main_app.router.routes = backup_routes
+                    await _sync_initialized_fastmcp_proxy(main_app)
+                except Exception as rollback_exc:
+                    state_cleanup_error = None
+                    try:
+                        state_manager.set_server_enabled(server_name, False)
+                    except StateSaveError as state_exc:
+                        state_cleanup_error = str(state_exc)
+                    cleanup_teardown = await teardown_server_runtime(
+                        main_app,
+                        server_name,
+                    )
+                    if cleanup_teardown.get("ok", True):
+                        _get_server_runtimes(main_app).pop(server_name, None)
+                    _remove_server_mounts(main_app, server_name)
+                    return JSONResponse(
+                        status_code=500,
+                        content=error_envelope(
+                            "Native MCP rollback failed",
+                            data={
+                                "remount": str(remount_exc),
+                                "rollback": str(rollback_exc),
+                                "failClosedState": state_cleanup_error,
+                            },
+                            code="state_rollback_failed",
+                        ),
+                    )
+                return JSONResponse(
+                    status_code=502,
+                    content=error_envelope(
+                        "Native MCP remount failed",
+                        data=str(remount_exc),
+                        code="native_remount_failed",
+                    ),
+                )
+
+            main_app.state.aggregate_openapi_dirty = True
+            return {"ok": True, "server": server_name, "enabled": False, "teardown": teardown_result}
 
     @main_app.post("/_meta/servers/{server_name}/tools/{tool_name}/enable")
     async def enable_tool(server_name: str, tool_name: str):
@@ -1521,6 +2768,7 @@ async def build_main_app(
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
         state_manager = main_app.state.state_manager
         state_manager.set_tool_enabled(server_name, tool_name, True)
+        main_app.state.aggregate_openapi_dirty = True
         return {"ok": True, "server": server_name, "tool": tool_name, "enabled": True}
 
     @main_app.post("/_meta/servers/{server_name}/tools/{tool_name}/disable")
@@ -1529,41 +2777,94 @@ async def build_main_app(
             return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
         state_manager = main_app.state.state_manager
         state_manager.set_tool_enabled(server_name, tool_name, False)
+        main_app.state.aggregate_openapi_dirty = True
         return {"ok": True, "server": server_name, "tool": tool_name, "enabled": False}
+
+    @main_app.get("/_meta/rest-tools")
+    async def get_rest_tools_enabled():  # noqa: D401
+        """Return whether REST-side (port 8000) tool endpoints are globally enabled."""
+        state_manager = main_app.state.state_manager
+        return {"ok": True, "enabled": state_manager.is_rest_tools_enabled()}
+
+    @main_app.post("/_meta/rest-tools/enable")
+    async def enable_rest_tools():  # noqa: D401
+        """Expose REST tools without changing server runtimes."""
+        if getattr(main_app.state, 'read_only_mode', False):
+            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
+        state_manager = main_app.state.state_manager
+        state_manager.set_rest_tools_enabled(True)
+        main_app.state.aggregate_openapi_dirty = True
+        logger.info("REST tools globally enabled; server runtimes unchanged")
+        return {"ok": True, "enabled": True}
+
+    @main_app.post("/_meta/rest-tools/disable")
+    async def disable_rest_tools():  # noqa: D401
+        """Hide and block REST tools without changing server runtimes."""
+        if getattr(main_app.state, 'read_only_mode', False):
+            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
+        state_manager = main_app.state.state_manager
+        state_manager.set_rest_tools_enabled(False)
+        main_app.state.aggregate_openapi_dirty = True
+        logger.info("REST tools globally disabled; server runtimes unchanged")
+        return {"ok": True, "enabled": False}
 
     @main_app.post("/_meta/servers")
     async def add_server(request: Request):  # noqa: D401
         """Add a new server to config (only in config-driven mode) and reload."""
-        if getattr(main_app.state, 'read_only_mode', False):
-            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
-        if not getattr(main_app.state, 'config_path', None):
-            return JSONResponse(status_code=400, content=error_envelope("Not running with a config file", code="no_config_mode"))
-        
+        if getattr(main_app.state, "read_only_mode", False):
+            return JSONResponse(
+                status_code=403,
+                content=error_envelope("Read-only mode enabled", code="read_only"),
+            )
+        cfg_path = getattr(main_app.state, "config_path", None)
+        if not cfg_path:
+            return JSONResponse(
+                status_code=400,
+                content=error_envelope(
+                    "Not running with a config file",
+                    code="no_config_mode",
+                ),
+            )
+
         try:
             payload = await request.json()
         except Exception:
-            return JSONResponse(status_code=422, content=error_envelope("Invalid JSON payload", code="invalid"))
-            
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Invalid JSON payload", code="invalid"),
+            )
+
         name = payload.get("name")
         if not name or not isinstance(name, str):
-            return JSONResponse(status_code=422, content=error_envelope("Missing name", code="invalid"))
-        # Normalize
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Missing name", code="invalid"),
+            )
         name = name.strip()
-        config_data = getattr(main_app.state, 'config_data', {"mcpServers": {}})
-        if name in config_data.get("mcpServers", {}):
-            return JSONResponse(status_code=409, content=error_envelope("Server already exists", code="exists"))
+        if not name:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Missing name", code="invalid"),
+            )
+
         server_entry: Dict[str, Any] = {}
-        # Accept stdio command
         command_str = payload.get("command")
         if command_str:
             if not isinstance(command_str, str):
-                return JSONResponse(status_code=422, content=error_envelope("command must be string", code="invalid"))
+                return JSONResponse(
+                    status_code=422,
+                    content=error_envelope("command must be string", code="invalid"),
+                )
             parts = command_str.strip().split()
             if not parts:
-                return JSONResponse(status_code=422, content=error_envelope("Empty command", code="invalid"))
+                return JSONResponse(
+                    status_code=422,
+                    content=error_envelope("Empty command", code="invalid"),
+                )
             server_entry["command"] = parts[0]
             if len(parts) > 1:
                 server_entry["args"] = parts[1:]
+
         url = payload.get("url")
         stype = payload.get("type")
         if url:
@@ -1573,49 +2874,199 @@ async def build_main_app(
         env = payload.get("env")
         if env and isinstance(env, dict):
             server_entry["env"] = env
-        # Basic validation reuse
+
         try:
             validate_server_config(name, server_entry)
-        except Exception as e:  # pragma: no cover - defensive
-            return JSONResponse(status_code=422, content=error_envelope(str(e), code="invalid"))
-        # Insert and persist
-        config_data.setdefault("mcpServers", {})[name] = server_entry
-        main_app.state.config_data = config_data
-        # Persist to file
-        cfg_path = getattr(main_app.state, 'config_path')
+        except Exception as exc:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope(str(exc), code="invalid"),
+            )
+
+        previous_file_bytes = _read_config_file_snapshot(cfg_path)
+        if previous_file_bytes is None:
+            return JSONResponse(
+                status_code=404,
+                content=error_envelope("Config file not found", code="not_found"),
+            )
         try:
-            with open(cfg_path, 'w') as f:
-                json.dump(config_data, f, indent=2, sort_keys=True)
-        except Exception as e:  # pragma: no cover
-            return JSONResponse(status_code=500, content=error_envelope("Failed to write config", data=str(e), code="io_error"))
-        # Reload to mount
+            raw_config = json.loads(previous_file_bytes.decode("utf-8-sig"))
+            validate_config_data(raw_config)
+            normalized_raw = normalize_config_shape(raw_config)
+            raw_servers = deepcopy(normalized_raw["mcpServers"])
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Current config is invalid",
+                    data=str(exc),
+                    code="config_invalid",
+                ),
+            )
+
+        if name in raw_servers:
+            return JSONResponse(
+                status_code=409,
+                content=error_envelope("Server already exists", code="exists"),
+            )
+
+        raw_servers[name] = server_entry
+        raw_candidate = replace_mcp_servers_preserving_shape(
+            raw_config,
+            raw_servers,
+        )
+        config_data = validate_config_data(raw_candidate)
+        previous_config_data = deepcopy(
+            getattr(main_app.state, "config_data", {"mcpServers": {}})
+        )
         try:
-            await reload_config_handler(main_app, config_data)
-        except Exception as e:  # pragma: no cover
-            return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
+            _atomic_write_config(
+                cfg_path,
+                json.dumps(raw_candidate, indent=2),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Failed to write config",
+                    data=str(exc),
+                    code="io_error",
+                ),
+            )
+
+        try:
+            await _reload_config_with_rollback(
+                main_app,
+                config_data,
+                previous_config_data,
+                cfg_path,
+                previous_file_bytes,
+            )
+        except ConfigRollbackError as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Configuration update and rollback failed",
+                    data={
+                        "update": str(exc.update_error),
+                        "rollback": str(exc.rollback_error),
+                    },
+                    code="rollback_failed",
+                ),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Reload failed",
+                    data=str(exc),
+                    code="reload_failed",
+                ),
+            )
+
+        main_app.state.aggregate_openapi_dirty = True
         return {"ok": True, "server": name}
 
     @main_app.delete("/_meta/servers/{server_name}")
     async def remove_server(server_name: str):  # noqa: D401
-        if not getattr(main_app.state, 'config_path', None):
-            return JSONResponse(status_code=400, content=error_envelope("Not running with a config file", code="no_config_mode"))
-        config_data = getattr(main_app.state, 'config_data', {"mcpServers": {}})
-        if server_name not in config_data.get("mcpServers", {}):
-            return JSONResponse(status_code=404, content=error_envelope("Server not found", code="not_found"))
-        del config_data["mcpServers"][server_name]
-        main_app.state.config_data = config_data
-        cfg_path = getattr(main_app.state, 'config_path')
-        try:
-            with open(cfg_path, 'w') as f:
-                json.dump(config_data, f, indent=2, sort_keys=True)
-        except Exception as e:  # pragma: no cover
-            return JSONResponse(status_code=500, content=error_envelope("Failed to write config", data=str(e), code="io_error"))
-        try:
-            await reload_config_handler(main_app, config_data)
-        except Exception as e:  # pragma: no cover
-            return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
-        return {"ok": True, "removed": server_name}
+        if getattr(main_app.state, "read_only_mode", False):
+            return JSONResponse(
+                status_code=403,
+                content=error_envelope("Read-only mode enabled", code="read_only"),
+            )
+        cfg_path = getattr(main_app.state, "config_path", None)
+        if not cfg_path:
+            return JSONResponse(
+                status_code=400,
+                content=error_envelope(
+                    "Not running with a config file",
+                    code="no_config_mode",
+                ),
+            )
 
+        previous_file_bytes = _read_config_file_snapshot(cfg_path)
+        if previous_file_bytes is None:
+            return JSONResponse(
+                status_code=404,
+                content=error_envelope("Config file not found", code="not_found"),
+            )
+        try:
+            raw_config = json.loads(previous_file_bytes.decode("utf-8-sig"))
+            validate_config_data(raw_config)
+            normalized_raw = normalize_config_shape(raw_config)
+            raw_servers = deepcopy(normalized_raw["mcpServers"])
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Current config is invalid",
+                    data=str(exc),
+                    code="config_invalid",
+                ),
+            )
+
+        if server_name not in raw_servers:
+            return JSONResponse(
+                status_code=404,
+                content=error_envelope("Server not found", code="not_found"),
+            )
+
+        del raw_servers[server_name]
+        raw_candidate = replace_mcp_servers_preserving_shape(
+            raw_config,
+            raw_servers,
+        )
+        config_data = validate_config_data(raw_candidate)
+        previous_config_data = deepcopy(
+            getattr(main_app.state, "config_data", {"mcpServers": {}})
+        )
+        try:
+            _atomic_write_config(
+                cfg_path,
+                json.dumps(raw_candidate, indent=2),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Failed to write config",
+                    data=str(exc),
+                    code="io_error",
+                ),
+            )
+
+        try:
+            await _reload_config_with_rollback(
+                main_app,
+                config_data,
+                previous_config_data,
+                cfg_path,
+                previous_file_bytes,
+            )
+        except ConfigRollbackError as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Configuration update and rollback failed",
+                    data={
+                        "update": str(exc.update_error),
+                        "rollback": str(exc.rollback_error),
+                    },
+                    code="rollback_failed",
+                ),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Reload failed",
+                    data=str(exc),
+                    code="reload_failed",
+                ),
+            )
+
+        main_app.state.aggregate_openapi_dirty = True
+        return {"ok": True, "removed": server_name}
     @main_app.get("/_meta/logs/sources")
     async def get_log_sources():
         """Get available log sources for UI."""
@@ -1658,9 +3109,15 @@ async def build_main_app(
                 }
             try:
                 target = urljoin(proxy_url.rstrip("/") + "/", "_meta/logs")
+                # Forward the API key so the fetch authenticates against the MCP proxy's
+                # /_meta/logs (the proxy requires it whenever MCPO_API_KEY is set); without
+                # this the fetch 401s and the UI shows no MCP logs.
+                _proxy_key = getattr(main_app.state, "api_key", "") or os.environ.get("MCPO_API_KEY", "")
+                _proxy_headers = {"Authorization": f"Bearer {_proxy_key}"} if _proxy_key else {}
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     response = await client.get(
                         target,
+                        headers=_proxy_headers,
                         params={
                             key: value
                             for key, value in {
@@ -1731,7 +3188,7 @@ async def build_main_app(
         try:
             with open(config_path, 'r') as f:
                 cfg = json.load(f)
-            mcp_servers = cfg.get("mcpServers", {})
+            mcp_servers = normalize_config_shape(cfg).get("mcpServers", {})
             content = json.dumps(mcp_servers, indent=2)
             return {"ok": True, "content": content, "path": config_path}
         except FileNotFoundError:
@@ -1742,6 +3199,8 @@ async def build_main_app(
     @main_app.post("/_meta/config/save")
     async def save_config_content(payload: Dict[str, Any]):
         """Save config file contents with validation."""
+        if getattr(main_app.state, 'read_only_mode', False):
+            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
         config_path = getattr(main_app.state, 'config_path', None)
         if not config_path:
             return JSONResponse(status_code=400, content=error_envelope("No config file configured", code="no_config"))
@@ -1751,8 +3210,12 @@ async def build_main_app(
             return JSONResponse(status_code=422, content=error_envelope("Missing or invalid content", code="invalid"))
         
         try:
-            # Validate JSON before saving
-            config_data = json.loads(content)
+            # Validate the complete configuration before touching the file.
+            config_data = validate_config_data(json.loads(content))
+            previous_config_data = deepcopy(
+                getattr(main_app.state, 'config_data', {"mcpServers": {}})
+            )
+            previous_file_bytes = _read_config_file_snapshot(config_path)
             
             # Backup existing config
             backup_path = f"{config_path}.backup"
@@ -1760,72 +3223,157 @@ async def build_main_app(
                 import shutil
                 shutil.copy2(config_path, backup_path)
             
-            # Save new config
-            with open(config_path, 'w') as f:
-                f.write(content)
+            # Save new config atomically, preserving the old file on write failure.
+            _atomic_write_config(config_path, content)
             
-            # Reload configuration
-            await reload_config_handler(main_app, config_data)
+            # Reload configuration and the MCP protocol mounts.
+            try:
+                await _reload_config_with_rollback(
+                    main_app,
+                    config_data,
+                    previous_config_data,
+                    config_path,
+                    previous_file_bytes,
+                )
+            except ConfigRollbackError as e:
+                return JSONResponse(
+                    status_code=500,
+                    content=error_envelope(
+                        "Configuration update and rollback failed",
+                        data={"update": str(e.update_error), "rollback": str(e.rollback_error)},
+                        code="rollback_failed",
+                    ),
+                )
+            except Exception as e:
+                return JSONResponse(status_code=500, content=error_envelope("Reload failed", data=str(e), code="reload_failed"))
+            main_app.state.aggregate_openapi_dirty = True
             
             return {"ok": True, "message": "Configuration saved and reloaded", "backup": backup_path}
             
         except json.JSONDecodeError as e:
             return JSONResponse(status_code=422, content=error_envelope("Invalid JSON format", data=str(e), code="invalid"))
+        except ValueError as e:
+            return JSONResponse(status_code=422, content=error_envelope(str(e), code="invalid"))
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to save config", data=str(e), code="io_error"))
 
     @main_app.post("/_meta/config/mcpServers/save")
     async def save_mcp_servers_content(payload: Dict[str, Any]):
-        """Update only the mcpServers section of the config and reload.
-
-        Accepts either:
-        - { "content": "{ ... }" } where content is a JSON string of the mcpServers object
-        - { "data": { ... } } where data is the parsed mcpServers object
-        """
-        config_path = getattr(main_app.state, 'config_path', None)
+        """Update only the authoritative mcpServers section and reload."""
+        if getattr(main_app.state, "read_only_mode", False):
+            return JSONResponse(
+                status_code=403,
+                content=error_envelope("Read-only mode enabled", code="read_only"),
+            )
+        config_path = getattr(main_app.state, "config_path", None)
         if not config_path:
-            return JSONResponse(status_code=400, content=error_envelope("No config file configured", code="no_config"))
+            return JSONResponse(
+                status_code=400,
+                content=error_envelope("No config file configured", code="no_config"),
+            )
 
         has_content = "content" in payload
         has_data = "data" in payload
         if not has_content and not has_data:
-            return JSONResponse(status_code=422, content=error_envelope("Missing content or data", code="invalid"))
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope("Missing content or data", code="invalid"),
+            )
 
         try:
-            if has_content:
-                new_mcp = json.loads(payload["content"])
-            else:
-                new_mcp = payload["data"]
+            new_mcp = (
+                json.loads(payload["content"])
+                if has_content
+                else payload["data"]
+            )
+        except json.JSONDecodeError as exc:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope(
+                    "Invalid JSON",
+                    data=str(exc),
+                    code="invalid_json",
+                ),
+            )
 
-            if not isinstance(new_mcp, dict):
-                return JSONResponse(status_code=422, content=error_envelope("mcpServers must be an object", code="invalid_type"))
+        if not isinstance(new_mcp, dict):
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope(
+                    "mcpServers must be an object",
+                    code="invalid_type",
+                ),
+            )
 
-            # Load full config
-            try:
-                with open(config_path, 'r') as f:
-                    full_cfg = json.load(f)
-            except FileNotFoundError:
-                full_cfg = {}
+        previous_file_bytes = _read_config_file_snapshot(config_path)
+        if previous_file_bytes is None:
+            return JSONResponse(
+                status_code=404,
+                content=error_envelope("Config file not found", code="not_found"),
+            )
+        try:
+            raw_config = json.loads(previous_file_bytes.decode("utf-8-sig"))
+            raw_candidate = replace_mcp_servers_preserving_shape(
+                raw_config,
+                new_mcp,
+            )
+            new_config = validate_config_data(raw_candidate)
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse(
+                status_code=422,
+                content=error_envelope(str(exc), code="invalid"),
+            )
 
-            # Replace mcpServers section
-            full_cfg["mcpServers"] = new_mcp
+        previous_config_data = deepcopy(
+            getattr(main_app.state, "config_data", {"mcpServers": {}})
+        )
+        try:
+            _atomic_write_config(
+                config_path,
+                json.dumps(raw_candidate, indent=2),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Failed to save mcpServers",
+                    data=str(exc),
+                    code="io_error",
+                ),
+            )
 
-            # Persist
-            with open(config_path, 'w') as f:
-                json.dump(full_cfg, f, indent=2)
+        try:
+            await _reload_config_with_rollback(
+                main_app,
+                new_config,
+                previous_config_data,
+                config_path,
+                previous_file_bytes,
+            )
+        except ConfigRollbackError as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Configuration update and rollback failed",
+                    data={
+                        "update": str(exc.update_error),
+                        "rollback": str(exc.rollback_error),
+                    },
+                    code="rollback_failed",
+                ),
+            )
+        except Exception as exc:
+            return JSONResponse(
+                status_code=500,
+                content=error_envelope(
+                    "Reload failed",
+                    data=str(exc),
+                    code="reload_failed",
+                ),
+            )
 
-            # Reload runtime and remount proxy paths
-            new_config = load_config(config_path)
-            await reload_config_handler(main_app, new_config)
-            _mount_or_remount_fastmcp(main_app, base_path="/mcp")
-            main_app.state.aggregate_openapi_dirty = True
-
-            return {"ok": True, "saved": True, "reloaded": True}
-        except json.JSONDecodeError as e:
-            return JSONResponse(status_code=422, content=error_envelope("Invalid JSON", data=str(e), code="invalid_json"))
-        except Exception as e:
-            return JSONResponse(status_code=500, content=error_envelope("Failed to save mcpServers", data=str(e), code="io_error"))
-
+        main_app.state.aggregate_openapi_dirty = True
+        return {"ok": True, "saved": True, "reloaded": True}
     @main_app.get("/_meta/requirements/content")
     async def get_requirements_content():
         """Get requirements.txt content."""
@@ -1842,6 +3390,8 @@ async def build_main_app(
     @main_app.post("/_meta/requirements/save")
     async def save_requirements_content(payload: Dict[str, Any]):
         """Save requirements.txt content."""
+        if getattr(main_app.state, 'read_only_mode', False):
+            return JSONResponse(status_code=403, content=error_envelope("Read-only mode enabled", code="read_only"))
         content = payload.get("content")
         if content is None:
             return JSONResponse(status_code=422, content=error_envelope("Missing content", code="invalid"))
@@ -1884,6 +3434,7 @@ async def build_main_app(
                 try:
                     new_config = load_config(config_path)
                     await reload_config_handler(main_app, new_config)
+                    main_app.state.aggregate_openapi_dirty = True
                 except Exception as e:  # pragma: no cover
                     logger.warning("Reload after requirements install failed: %s", e)
 
@@ -1892,12 +3443,159 @@ async def build_main_app(
         except Exception as e:
             return JSONResponse(status_code=500, content=error_envelope("Failed to save requirements", data=str(e), code="io_error"))
 
+    @main_app.get("/_meta/aggregate_openapi")
+    async def aggregate_openapi(force_refresh: bool = False):
+        """Unified OpenAPI 3.1 spec combining all enabled MCP servers."""
+        state_manager = main_app.state.state_manager
+
+        cache_key = "aggregate_openapi_cache"
+        if not force_refresh and hasattr(main_app.state, cache_key):
+            cache = getattr(main_app.state, cache_key)
+            if cache and not getattr(main_app.state, "aggregate_openapi_dirty", False):
+                return JSONResponse(content=cache["schema"])
+
+        base_spec: Dict[str, Any] = {
+            "openapi": "3.1.0",
+            "info": {"title": "MCPO Aggregated API", "version": "1.0.0", "description": "Unified API combining all enabled MCP servers"},
+            "paths": {},
+            "components": {"schemas": {}, "securitySchemes": {}, "responses": {}, "parameters": {}},
+            "tags": [],
+        }
+        if not state_manager.is_rest_tools_enabled():
+            cache_data = {
+                "schema": base_spec,
+                "built_at": datetime.now(timezone.utc).isoformat(),
+            }
+            setattr(main_app.state, cache_key, cache_data)
+            setattr(main_app.state, "aggregate_openapi_dirty", False)
+            return JSONResponse(content=base_spec)
+
+        server_tags: set = set()
+
+        for route in main_app.router.routes:
+            if not isinstance(route, Mount) or not isinstance(route.app, FastAPI):
+                continue
+            sub_app = route.app
+            server_name = _server_name_from_mount(route)
+            if getattr(sub_app.state, "is_fastmcp_proxy", False):
+                continue
+            if not state_manager.is_server_enabled(server_name):
+                continue
+            if not getattr(sub_app.state, "is_connected", False):
+                if sub_app.title != "MCPO Management Server":
+                    continue
+            try:
+                server_spec = sub_app.openapi()
+                if not server_spec or "paths" not in server_spec:
+                    continue
+                mount_path = route.path.rstrip("/")
+                server_title = server_spec.get("info", {}).get("title", server_name)
+                server_tags.add(server_title)
+
+                server_components = server_spec.get("components", {})
+                if not isinstance(server_components, dict):
+                    server_components = {}
+
+                component_suffix = "".join(
+                    char if char.isalnum() or char in ".-_" else "_"
+                    for char in server_name
+                ).strip("_") or "server"
+                component_mapping: Dict[tuple[str, str], str] = {}
+
+                # Reserve every target name before copying content so local refs can
+                # be rewritten even when they point to a later component.
+                for comp_type, components in server_components.items():
+                    if not isinstance(components, dict):
+                        continue
+                    target_components = base_spec["components"].setdefault(comp_type, {})
+                    reserved_names = set(target_components)
+                    for comp_name in components:
+                        target_name = comp_name
+                        if target_name in reserved_names:
+                            base_name = f"{comp_name}_{component_suffix}"
+                            target_name = base_name
+                            suffix = 2
+                            while target_name in reserved_names:
+                                target_name = f"{base_name}_{suffix}"
+                                suffix += 1
+                        component_mapping[(comp_type, comp_name)] = target_name
+                        reserved_names.add(target_name)
+
+                def _rewrite_server_refs(value: Any) -> Any:
+                    if isinstance(value, dict):
+                        rewritten = {
+                            key: _rewrite_server_refs(child)
+                            for key, child in value.items()
+                        }
+                        ref = value.get("$ref")
+                        if isinstance(ref, str) and ref.startswith("#/components/"):
+                            parts = ref.split("/")
+                            if len(parts) >= 4:
+                                target_name = component_mapping.get((parts[2], parts[3]))
+                                if target_name:
+                                    parts[3] = target_name
+                                    rewritten["$ref"] = "/".join(parts)
+                        return rewritten
+                    if isinstance(value, list):
+                        return [_rewrite_server_refs(child) for child in value]
+                    return value
+
+                # Copy components into the aggregate after the full local mapping is
+                # known. This leaves each sub-app's cached OpenAPI object untouched.
+                for comp_type, components in server_components.items():
+                    if not isinstance(components, dict):
+                        continue
+                    target_components = base_spec["components"].setdefault(comp_type, {})
+                    for comp_name, comp_spec in components.items():
+                        target_name = component_mapping[(comp_type, comp_name)]
+                        target_components[target_name] = _rewrite_server_refs(comp_spec)
+
+                # Merge paths with tool enable/disable filtering
+                server_state = state_manager.get_server_state(server_name)
+                tool_states = server_state["tools"]
+                for path, path_spec in server_spec.get("paths", {}).items():
+                    if path in ["/docs", "/openapi.json"] or path.startswith("/openapi"):
+                        continue
+                    if path.startswith("/") and path.count("/") == 1:
+                        tool_name = path.lstrip("/")
+                        if not tool_states.get(tool_name, True):
+                            continue
+                    merged_path = mount_path + path if path != "/" else mount_path
+                    if merged_path in base_spec["paths"]:
+                        merged_path = f"{mount_path}_{server_name}{path}"
+                    rewritten_path_spec = _rewrite_server_refs(path_spec)
+                    if isinstance(rewritten_path_spec, dict):
+                        for method, operation in rewritten_path_spec.items():
+                            if isinstance(operation, dict):
+                                if "tags" not in operation:
+                                    operation["tags"] = []
+                                if server_title not in operation["tags"]:
+                                    operation["tags"].append(server_title)
+                    base_spec["paths"][merged_path] = rewritten_path_spec
+            except Exception as e:
+                logger.error("Failed to process server %s for aggregation: %s", server_name, e)
+                continue
+
+        for tag_name in sorted(server_tags):
+            base_spec["tags"].append({"name": tag_name, "description": f"Tools from {tag_name} server"})
+
+        cache_data = {"schema": base_spec, "built_at": datetime.now(timezone.utc).isoformat()}
+        setattr(main_app.state, cache_key, cache_data)
+        setattr(main_app.state, "aggregate_openapi_dirty", False)
+        return JSONResponse(content=base_spec)
+
     # Create internal MCPO MCP server for self-management tools (mounted under /mcpo)
     mcpo_app = await create_internal_mcpo_server(main_app, api_dependency)
     main_app.mount("/mcpo", mcpo_app, name="mcpo")
 
     project_root = Path(__file__).resolve().parents[2]
-    static_ui_dir = project_root / "static" / "ui"
+    packaged_static_ui_dir = Path(__file__).resolve().parent / "static" / "ui"
+    project_static_ui_dir = project_root / "static" / "ui"
+    static_ui_dir = (
+        packaged_static_ui_dir
+        if packaged_static_ui_dir.is_dir()
+        else project_static_ui_dir
+    )
     mcp_settings_dist_dir = project_root / "mcp-server-settings" / "dist"
     mcp_settings_dir = project_root / "mcp-server-settings"
 
@@ -1994,11 +3692,17 @@ async def build_main_app(
     if hot_reload and config_path:
         logger.info(f"Enabling hot reload for config file: {config_path}")
 
-        async def reload_callback(new_config):
-            await reload_config_handler(main_app, new_config)
+        async def reload_callback(_new_config):
+            async with _get_config_transaction_lock(main_app):
+                current_config = load_config(config_path)
+                await _reload_runtime_surfaces_with_rollback(
+                    main_app,
+                    current_config,
+                )
 
         config_watcher = ConfigWatcher(config_path, reload_callback)
         config_watcher.start()
+        main_app.state.config_watcher = config_watcher
 
     return main_app
 
@@ -2031,15 +3735,21 @@ async def run(
     # Get hot reload config
     hot_reload = kwargs.get("hot_reload", False)
     config_path = kwargs.get("config_path")
-    config_watcher = None
-    if hot_reload and config_path:
+    config_watcher = getattr(main_app.state, "config_watcher", None)
+    if hot_reload and config_path and config_watcher is None:
         logger.info(f"Enabling hot reload for config file: {config_path}")
 
-        async def reload_callback(new_config):
-            await reload_config_handler(main_app, new_config)
+        async def reload_callback(_new_config):
+            async with _get_config_transaction_lock(main_app):
+                current_config = load_config(config_path)
+                await _reload_runtime_surfaces_with_rollback(
+                    main_app,
+                    current_config,
+                )
 
         config_watcher = ConfigWatcher(config_path, reload_callback)
         config_watcher.start()
+        main_app.state.config_watcher = config_watcher
 
     logger.info("Uvicorn server starting...")
     log_level = kwargs.get("log_level", "info").lower()

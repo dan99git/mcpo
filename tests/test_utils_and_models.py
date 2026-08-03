@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from mcpo.utils.config import (
     interpolate_env_placeholders,
     interpolate_env_placeholders_in_config,
+    vendor_site_port_from_env,
 )
 from mcpo.utils.auth import APIKeyMiddleware, get_verify_api_key
 from mcpo.utils.main import (
@@ -95,21 +96,25 @@ class TestInterpolateEnvPlaceholders:
 class TestInterpolateEnvPlaceholdersInConfig:
     """Tests for interpolate_env_placeholders_in_config."""
 
-    def test_processes_nested_env_and_headers(self, monkeypatch):
-        """env and headers blocks inside mcpServers are interpolated."""
+    def test_processes_nested_env_headers_and_url(self, monkeypatch):
+        """env, headers, and backend URL values inside mcpServers are interpolated."""
         monkeypatch.setenv("DB_HOST", "localhost")
         monkeypatch.setenv("API_TOKEN", "tok-123")
+        monkeypatch.setenv("SITE_ID", "44354")
+        monkeypatch.setenv("VENDOR_DOMAIN", "ai.lighting")
         cfg = {
             "mcpServers": {
                 "db": {
                     "env": {"HOST": "${DB_HOST}"},
                     "headers": {"Authorization": "Bearer ${API_TOKEN}"},
+                    "url": "https://${SITE_ID}.${VENDOR_DOMAIN}/mcp",
                 }
             }
         }
         out = interpolate_env_placeholders_in_config(cfg)
         assert out["mcpServers"]["db"]["env"]["HOST"] == "localhost"
         assert out["mcpServers"]["db"]["headers"]["Authorization"] == "Bearer tok-123"
+        assert out["mcpServers"]["db"]["url"] == "https://44354.ai.lighting/mcp"
 
     def test_original_config_not_mutated(self, monkeypatch):
         """Deep-copies so the caller's dict is untouched."""
@@ -127,6 +132,21 @@ class TestInterpolateEnvPlaceholdersInConfig:
         cfg = {"mcpServers": {"s": {"command": "python"}}}
         out = interpolate_env_placeholders_in_config(cfg)
         assert out["mcpServers"]["s"]["command"] == "python"
+
+
+class TestVendorSitePortFromEnv:
+    """Tests for the site-id and host-port deployment contract."""
+
+    def test_returns_valid_five_digit_site_port(self):
+        assert vendor_site_port_from_env({"BOS_VENDOR_SITE_ID": "44354"}) == 44354
+
+    def test_returns_none_when_site_id_is_not_configured(self):
+        assert vendor_site_port_from_env({}) is None
+
+    @pytest.mark.parametrize("value", ["4435", "abcde", "00000", "65536"])
+    def test_rejects_invalid_site_id(self, value):
+        with pytest.raises(ValueError, match="10000\\.\\.65535"):
+            vendor_site_port_from_env({"BOS_VENDOR_SITE_ID": value})
 
 
 # ===================================================================

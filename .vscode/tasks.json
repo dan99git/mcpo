@@ -4,7 +4,7 @@
 		{
 			"label": "run mcpo server",
 			"type": "shell",
-			"command": "powershell -Command \"$env:PYTHONPATH='D:/mcpo/src'; D:/mcpo/.venv/Scripts/python.exe -m mcpo serve --config D:/mcpo/mcpo.json --host 127.0.0.1 --port 8000 --hot-reload --env-path D:/.env\"",
+			"command": "powershell -Command \"$env:PYTHONPATH='D:/vibe-coded-projects/mcpo/src'; D:/vibe-coded-projects/mcpo/.venv/Scripts/python.exe -m mcpo serve --config D:/vibe-coded-projects/mcpo/mcpo.json --host 127.0.0.1 --port 8000 --hot-reload --env-path D:/vibe-coded-projects/mcpo/.env\"",
 			"isBackground": false,
 			"problemMatcher": [
 				"$tsc"

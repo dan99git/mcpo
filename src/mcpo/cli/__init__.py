@@ -69,6 +69,7 @@ def serve_command(
     
     # Set up environment
     ServerRunner.setup_environment(env_path)
+    api_key = api_key or os.getenv("MCPO_API_KEY")
     
     # Normalize path prefix
     path_prefix = ServerRunner.normalize_path_prefix(path_prefix)

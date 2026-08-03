@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "building-os": {
+      "enabled": true,
+      "type": "streamable-http",
+      "url": "https://${BOS_VENDOR_SITE_ID}.${VENDOR_PUBLIC_DOMAIN}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${BOS_VENDOR_SITE_ACCESS_KEY}"
+      }
+    }
+  }
+}

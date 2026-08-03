@@ -23,6 +23,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_SEARCH_LIMIT = 10
+MAX_SEARCH_LIMIT = 100
+
+# Reserved pseudo-server name used by chat.py for MCPO management tools.
+# Their visibility is governed by the per-session include_management_tools
+# opt-in (they never enter the catalog without it), not by MCP server state,
+# so they are exempt from enabled/disabled filtering.
+MANAGEMENT_SERVER_NAME = "mcpo"
+
 
 # ---------------------------------------------------------------------------
 # Tool catalog entry
@@ -37,6 +46,7 @@ class CatalogEntry:
     description: str
     input_schema: Dict[str, Any]
     tags: List[str] = field(default_factory=list)
+    upstream_name: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +89,7 @@ def build_catalog(tools_by_server: Dict[str, List[Dict[str, Any]]]) -> List[Cata
                 description=desc,
                 input_schema=schema,
                 tags=tags,
+                upstream_name=tool.get("_mcpo_upstream_name") or tool_name,
             ))
     return catalog
 
@@ -87,16 +98,55 @@ def build_catalog(tools_by_server: Dict[str, List[Dict[str, Any]]]) -> List[Cata
 # Search
 # ---------------------------------------------------------------------------
 
+def filter_enabled_entries(
+    catalog: List[CatalogEntry],
+    state_manager: Optional[Any] = None,
+) -> List[CatalogEntry]:
+    """
+    Drop catalog entries whose server or tool is currently disabled.
+
+    Checked at serve time so disabled servers/tools never reach the LLM via
+    search_tools, even when the catalog was cached while they were enabled.
+    """
+    if state_manager is None:
+        from mcpo.services.state import get_state_manager
+
+        state_manager = get_state_manager()
+    # Pick up changes made by other processes (e.g. the admin UI).
+    state_manager.refresh_if_changed()
+    return [
+        entry
+        for entry in catalog
+        if entry.server_name == MANAGEMENT_SERVER_NAME
+        or (
+            state_manager.is_server_enabled(entry.server_name)
+            and state_manager.is_tool_enabled(entry.server_name, entry.tool_name)
+        )
+    ]
+
+
 def search_catalog(
     catalog: List[CatalogEntry],
     query: str,
-    limit: int = 10,
+    limit: int = DEFAULT_SEARCH_LIMIT,
+    state_manager: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """
     Search the tool catalog by keyword matching against names, descriptions, and tags.
 
-    Returns a list of result dicts suitable for returning to the LLM.
+    Disabled servers/tools are excluded at serve time. Returns a list of
+    result dicts suitable for returning to the LLM.
     """
+    catalog = filter_enabled_entries(catalog, state_manager)
+
+    if isinstance(limit, bool) or not isinstance(limit, int):
+        limit = DEFAULT_SEARCH_LIMIT
+    else:
+        limit = max(1, min(limit, MAX_SEARCH_LIMIT))
+
+    if not isinstance(query, str):
+        query = ""
+
     if not query or not query.strip():
         # Return all (up to limit)
         results = catalog[:limit]
@@ -164,8 +214,13 @@ SEARCH_TOOLS_SCHEMA: Dict[str, Any] = {
             },
             "limit": {
                 "type": "integer",
-                "description": "Maximum number of results to return (default 10).",
-                "default": 10,
+                "description": (
+                    "Maximum number of results to return "
+                    f"(default {DEFAULT_SEARCH_LIMIT}, maximum {MAX_SEARCH_LIMIT})."
+                ),
+                "default": DEFAULT_SEARCH_LIMIT,
+                "minimum": 1,
+                "maximum": MAX_SEARCH_LIMIT,
             },
         },
         "required": [],

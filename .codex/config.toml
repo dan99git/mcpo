@@ -1,0 +1,3 @@
+# [mcp_servers.mcpo]
+# url = "http://localhost:8001/mcp/"
+# http_headers = { Authorization = "Bearer top-secret" }

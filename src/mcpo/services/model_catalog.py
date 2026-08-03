@@ -9,6 +9,7 @@ import httpx
 from mcpo.providers.glm import get_glm_models
 from mcpo.providers.kimi import get_kimi_models
 from mcpo.providers.minimax import get_minimax_models
+from mcpo.services.provider_models import list_provider_models
 
 
 def _format_model_label(model_id: str) -> str:
@@ -169,25 +170,4 @@ async def fetch_kimi_models() -> List[Dict[str, str]]:
 
 
 async def list_all_models() -> List[Dict[str, str]]:
-    results = await asyncio.gather(
-        fetch_minimax_models(),
-        fetch_glm_models(),
-        fetch_kimi_models(),
-        fetch_openrouter_models(),
-        fetch_openai_models(),
-        fetch_google_models(),
-        fetch_anthropic_models(),
-        return_exceptions=True,
-    )
-    all_models: List[Dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for result in results:
-        if isinstance(result, Exception):
-            continue
-        for model in result:
-            model_id = model.get("id")
-            provider = model.get("provider")
-            if model_id and provider and (provider, model_id) not in seen:
-                seen.add((provider, model_id))
-                all_models.append(model)
-    return all_models
+    return await list_provider_models()

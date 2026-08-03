@@ -1,0 +1,475 @@
+{
+  "name": "kicad-cli",
+  "description": "KiCad 10.0.4 command line interface: schematic/PCB checks and exports.",
+  "command": "C:/Users/danie/AppData/Local/Programs/KiCad/10.0/bin/kicad-cli.exe",
+  "default_timeout_sec": 120,
+  "tools": [
+    {
+      "name": "version",
+      "description": "Report the installed kicad-cli version.",
+      "args": ["version"],
+      "params": {
+        "format": {
+          "type": "string",
+          "description": "Version info format: plain, commit, or about. Default plain.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        }
+      }
+    },
+    {
+      "name": "sch_erc",
+      "description": "Run the Electrical Rules Check (ERC) on a KiCad schematic (.kicad_sch) and write a report.",
+      "args": ["sch", "erc", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the schematic file (.kicad_sch) to check.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the ERC report to.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Report format: json or report. Default report.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        },
+        "units": {
+          "type": "string",
+          "description": "Units used in the report: in, mm, or mils. Default mm.",
+          "required": false,
+          "args": ["--units", "{units}"]
+        },
+        "severity_all": {
+          "type": "boolean",
+          "description": "Report all ERC violation severities (errors, warnings, and exclusions).",
+          "required": false,
+          "args": ["--severity-all"]
+        },
+        "exit_code_violations": {
+          "type": "boolean",
+          "description": "Return a nonzero exit code if any ERC violations exist.",
+          "required": false,
+          "args": ["--exit-code-violations"]
+        }
+      }
+    },
+    {
+      "name": "pcb_drc",
+      "description": "Run the Design Rules Check (DRC) on a KiCad PCB (.kicad_pcb) and write a report.",
+      "args": ["pcb", "drc", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to check.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the DRC report to.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Report format: json or report. Default report.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        },
+        "units": {
+          "type": "string",
+          "description": "Units used in the report: in, mm, or mils. Default mm.",
+          "required": false,
+          "args": ["--units", "{units}"]
+        },
+        "severity_all": {
+          "type": "boolean",
+          "description": "Report all DRC violation severities (errors, warnings, and exclusions).",
+          "required": false,
+          "args": ["--severity-all"]
+        },
+        "exit_code_violations": {
+          "type": "boolean",
+          "description": "Return a nonzero exit code if any DRC violations exist.",
+          "required": false,
+          "args": ["--exit-code-violations"]
+        },
+        "schematic_parity": {
+          "type": "boolean",
+          "description": "Also test for parity between the PCB and its schematic.",
+          "required": false,
+          "args": ["--schematic-parity"]
+        },
+        "all_track_errors": {
+          "type": "boolean",
+          "description": "Report all errors for each track, not just the first.",
+          "required": false,
+          "args": ["--all-track-errors"]
+        }
+      }
+    },
+    {
+      "name": "sch_export_pdf",
+      "description": "Export a KiCad schematic (.kicad_sch) to a single PDF file.",
+      "args": ["sch", "export", "pdf", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the schematic file (.kicad_sch) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the exported PDF file.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "black_and_white": {
+          "type": "boolean",
+          "description": "Render the PDF in black and white only.",
+          "required": false,
+          "args": ["--black-and-white"]
+        },
+        "exclude_drawing_sheet": {
+          "type": "boolean",
+          "description": "Omit the drawing sheet (title block and border) from the export.",
+          "required": false,
+          "args": ["--exclude-drawing-sheet"]
+        },
+        "pages": {
+          "type": "string",
+          "description": "Comma separated list of page numbers to export. Blank or unspecified exports all pages.",
+          "required": false,
+          "args": ["--pages", "{pages}"]
+        }
+      }
+    },
+    {
+      "name": "sch_export_svg",
+      "description": "Export a KiCad schematic (.kicad_sch) to SVG files, one per sheet, into an output directory.",
+      "args": ["sch", "export", "svg", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the schematic file (.kicad_sch) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to the output directory for exported SVG files.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "black_and_white": {
+          "type": "boolean",
+          "description": "Render the SVG in black and white only.",
+          "required": false,
+          "args": ["--black-and-white"]
+        },
+        "exclude_drawing_sheet": {
+          "type": "boolean",
+          "description": "Omit the drawing sheet (title block and border) from the export.",
+          "required": false,
+          "args": ["--exclude-drawing-sheet"]
+        },
+        "pages": {
+          "type": "string",
+          "description": "Comma separated list of page numbers to export. Blank or unspecified exports all pages.",
+          "required": false,
+          "args": ["--pages", "{pages}"]
+        }
+      }
+    },
+    {
+      "name": "sch_export_netlist",
+      "description": "Export a netlist from a KiCad schematic (.kicad_sch).",
+      "args": ["sch", "export", "netlist", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the schematic file (.kicad_sch) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the netlist file.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Netlist format: kicadsexpr, kicadxml, cadstar, orcadpcb2, spice, spicemodel, pads, or allegro. Default kicadsexpr.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        }
+      }
+    },
+    {
+      "name": "sch_export_bom",
+      "description": "Generate a Bill of Materials (BOM) from a KiCad schematic (.kicad_sch).",
+      "args": ["sch", "export", "bom", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the schematic file (.kicad_sch) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the BOM file.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "fields": {
+          "type": "string",
+          "description": "Ordered comma separated list of fields to export, e.g. Reference,Value,Footprint,QUANTITY,DNP.",
+          "required": false,
+          "args": ["--fields", "{fields}"]
+        },
+        "group_by": {
+          "type": "string",
+          "description": "Comma separated list of fields to group references by when their values match.",
+          "required": false,
+          "args": ["--group-by", "{group_by}"]
+        },
+        "exclude_dnp": {
+          "type": "boolean",
+          "description": "Exclude symbols marked Do-Not-Populate.",
+          "required": false,
+          "args": ["--exclude-dnp"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_gerbers",
+      "description": "Plot Gerber files for a KiCad PCB (.kicad_pcb) into an output directory.",
+      "args": ["pcb", "export", "gerbers", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to the output directory for Gerber files.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "layers": {
+          "type": "string",
+          "description": "Comma separated list of untranslated layer names to include, e.g. F.Cu,B.Cu. Default is all copper and technical layers.",
+          "required": false,
+          "args": ["--layers", "{layers}"]
+        },
+        "use_drill_file_origin": {
+          "type": "boolean",
+          "description": "Use the drill/place file origin instead of absolute coordinates.",
+          "required": false,
+          "args": ["--use-drill-file-origin"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_drill",
+      "description": "Generate drill files for a KiCad PCB (.kicad_pcb) into an output directory.",
+      "args": ["pcb", "export", "drill", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to the output directory for drill files.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Drill file format: excellon or gerber. Default excellon.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        },
+        "excellon_units": {
+          "type": "string",
+          "description": "Output units for Excellon files: in or mm. Default mm.",
+          "required": false,
+          "args": ["--excellon-units", "{excellon_units}"]
+        },
+        "generate_map": {
+          "type": "boolean",
+          "description": "Also generate a map/summary of drill hits.",
+          "required": false,
+          "args": ["--generate-map"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_pdf",
+      "description": "Plot a KiCad PCB (.kicad_pcb) to PDF for the given layers.",
+      "args": ["pcb", "export", "pdf", "{input_file}", "--layers", "{layers}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "layers": {
+          "type": "string",
+          "description": "Comma separated list of untranslated layer names to plot, e.g. F.Cu,B.Cu. At least one layer is required by kicad-cli.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Output directory for the exported PDF (an exact file path only if mode-single behavior applies).",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "black_and_white": {
+          "type": "boolean",
+          "description": "Render the PDF in black and white only.",
+          "required": false,
+          "args": ["--black-and-white"]
+        },
+        "mirror": {
+          "type": "boolean",
+          "description": "Mirror the board, useful for showing bottom layers.",
+          "required": false,
+          "args": ["--mirror"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_svg",
+      "description": "Plot a KiCad PCB (.kicad_pcb) to SVG for the given layers.",
+      "args": ["pcb", "export", "svg", "{input_file}", "--layers", "{layers}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "layers": {
+          "type": "string",
+          "description": "Comma separated list of untranslated layer names to plot, e.g. F.Cu,B.Cu. At least one layer is required by kicad-cli.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to the output directory for exported SVG files.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "black_and_white": {
+          "type": "boolean",
+          "description": "Render the SVG in black and white only.",
+          "required": false,
+          "args": ["--black-and-white"]
+        },
+        "mirror": {
+          "type": "boolean",
+          "description": "Mirror the board, useful for showing bottom layers.",
+          "required": false,
+          "args": ["--mirror"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_step",
+      "description": "Export a KiCad PCB (.kicad_pcb) to a STEP 3D model file.",
+      "args": ["pcb", "export", "step", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the exported STEP file.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Overwrite the output file if it already exists.",
+          "required": false,
+          "args": ["--force"]
+        },
+        "board_only": {
+          "type": "boolean",
+          "description": "Only generate the board body, without component 3D models.",
+          "required": false,
+          "args": ["--board-only"]
+        },
+        "subst_models": {
+          "type": "boolean",
+          "description": "Substitute STEP or IGS models in place of VRML models where available.",
+          "required": false,
+          "args": ["--subst-models"]
+        },
+        "no_dnp": {
+          "type": "boolean",
+          "description": "Exclude 3D models for components marked Do-Not-Populate.",
+          "required": false,
+          "args": ["--no-dnp"]
+        }
+      }
+    },
+    {
+      "name": "pcb_export_pos",
+      "description": "Generate a component position (pick-and-place) file from a KiCad PCB (.kicad_pcb).",
+      "args": ["pcb", "export", "pos", "{input_file}"],
+      "params": {
+        "input_file": {
+          "type": "string",
+          "description": "Path to the PCB file (.kicad_pcb) to export.",
+          "required": true
+        },
+        "output": {
+          "type": "string",
+          "description": "Path to write the position file.",
+          "required": true,
+          "args": ["-o", "{output}"]
+        },
+        "side": {
+          "type": "string",
+          "description": "Which side to include: front, back, or both. Default both. Gerber format only supports front or back.",
+          "required": false,
+          "args": ["--side", "{side}"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Position file format: ascii, csv, or gerber. Default ascii.",
+          "required": false,
+          "args": ["--format", "{format}"]
+        },
+        "units": {
+          "type": "string",
+          "description": "Output units for ascii/csv format: in or mm. Default in.",
+          "required": false,
+          "args": ["--units", "{units}"]
+        },
+        "smd_only": {
+          "type": "boolean",
+          "description": "Include only SMD footprints.",
+          "required": false,
+          "args": ["--smd-only"]
+        },
+        "exclude_dnp": {
+          "type": "boolean",
+          "description": "Exclude footprints marked Do-Not-Populate.",
+          "required": false,
+          "args": ["--exclude-dnp"]
+        }
+      }
+    }
+  ]
+}

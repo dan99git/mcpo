@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import json
 import logging
 import os
@@ -53,6 +55,112 @@ def _as_json_str(content: Any) -> str:
 def _json(obj: Any) -> str:
     """Compact JSON serialization."""
     return json.dumps(obj, separators=(",", ":"), ensure_ascii=False)
+
+
+def _parse_base64_data_url(value: Any, label: str) -> tuple[str, str]:
+    if not isinstance(value, str) or not value.startswith("data:"):
+        raise GeminiError(f"{label} must be a base64 data URL")
+    header, separator, data = value.partition(",")
+    if not separator or not data:
+        raise GeminiError(f"{label} is an incomplete data URL")
+    metadata = header[5:].split(";")
+    media_type = metadata[0].lower()
+    if not media_type or "base64" not in {item.lower() for item in metadata[1:]}:
+        raise GeminiError(f"{label} must declare a MIME type and base64 encoding")
+    try:
+        base64.b64decode(data, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise GeminiError(f"{label} contains invalid base64 data") from exc
+    return media_type, data
+
+
+def _gemini_user_parts(content: Any) -> List[Dict[str, Any]]:
+    if isinstance(content, str):
+        return [{"text": content}]
+    if not isinstance(content, list):
+        raise GeminiError(
+            "Gemini user content must be a string or an array of content blocks"
+        )
+
+    parts: List[Dict[str, Any]] = []
+    for index, block in enumerate(content):
+        if not isinstance(block, dict):
+            raise GeminiError(f"Gemini content block {index} must be an object")
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text")
+            if not isinstance(text, str):
+                raise GeminiError(
+                    f"Gemini text block {index} must contain string text"
+                )
+            parts.append({"text": text})
+            continue
+
+        if block_type == "image_url":
+            image = block.get("image_url")
+            if isinstance(image, dict):
+                image = image.get("url")
+            if isinstance(image, str) and not image.startswith("data:"):
+                raise GeminiError(
+                    "Remote image URLs are not supported by this Gemini adapter"
+                )
+            media_type, data = _parse_base64_data_url(
+                image, f"Gemini image block {index}"
+            )
+            if not media_type.startswith("image/"):
+                raise GeminiError(
+                    f"Gemini image block {index} has non-image MIME type "
+                    f"'{media_type}'"
+                )
+            parts.append({
+                "inlineData": {
+                    "mimeType": media_type,
+                    "data": data,
+                }
+            })
+            continue
+
+        if block_type == "file":
+            file_block = block.get("file")
+            if not isinstance(file_block, dict):
+                raise GeminiError(
+                    f"Gemini file block {index} must contain a file object"
+                )
+            source_keys = [
+                key
+                for key in ("file_data", "file_id", "file_url")
+                if file_block.get(key) is not None
+            ]
+            if len(source_keys) != 1:
+                raise GeminiError(
+                    f"Gemini file block {index} must provide exactly one file source"
+                )
+            if source_keys[0] != "file_data":
+                raise GeminiError(
+                    "Remote file URLs and provider file IDs are not supported by "
+                    "this Gemini adapter"
+                )
+            media_type, data = _parse_base64_data_url(
+                file_block["file_data"], f"Gemini file block {index}"
+            )
+            if media_type != "application/pdf":
+                raise GeminiError(
+                    f"Gemini file block {index} has unsupported MIME type "
+                    f"'{media_type}'"
+                )
+            parts.append({
+                "inlineData": {
+                    "mimeType": media_type,
+                    "data": data,
+                }
+            })
+            continue
+
+        raise GeminiError(
+            f"Unsupported Gemini content block type '{block_type}' at index {index}"
+        )
+    return parts
+
 
 def _is_flash_model(model: str) -> bool:
     """Check if model is a Flash variant."""
@@ -236,25 +344,7 @@ class GeminiClient:
                 continue
 
             if role == "user":
-                parts = []
-                
-                if isinstance(content, str):
-                    parts.append({"text": content})
-                elif isinstance(content, list):
-                    for item in content:
-                        if isinstance(item, dict):
-                            if item.get("type") == "text":
-                                parts.append({"text": item.get("text", "")})
-                            elif item.get("type") == "image_url":
-                                image_url = item.get("image_url", {})
-                                url = image_url.get("url", "")
-                                if url.startswith("data:"):
-                                    parts.append({
-                                        "inlineData": {
-                                            "mimeType": "image/jpeg",
-                                            "data": url.split(",")[1] if "," in url else url
-                                        }
-                                    })
+                parts = _gemini_user_parts(content)
                 
                 if self._enable_caching and len(formatted_contents) > 10:
                      if parts:
