@@ -28,6 +28,9 @@ mcpo.local*.json
 # Temp / backup artifacts
 *.bak
 *.swp
+
+# Agent worktrees (embedded git repos, never track)
+.claude/worktrees/
 *.swo
 *.tmp
 *~
