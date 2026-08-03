@@ -8,7 +8,7 @@
     
     <!-- Modular CSS -->
     <link rel="stylesheet" href="/ui/css/base.css?v=20250930222949">
-    <link rel="stylesheet" href="/ui/css/layout.css?v=20250930222949">
+    <link rel="stylesheet" href="/ui/css/layout.css?v=20260730">
     <link rel="stylesheet" href="/ui/css/components.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/logs.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/config.css?v=20260721">
@@ -44,6 +44,9 @@
                 </div>
                 <div class="nav-item" data-page="settings">
                     <span>Settings</span>
+                </div>
+                <div class="nav-item" data-page="changelog">
+                    <span>Changelog</span>
                 </div>
                 <div class="nav-item" data-page="about">
                     <span>About</span>
@@ -635,6 +638,10 @@
                                 </div>
 
                                 <div id="settings-codex-key-list" class="settings-codex-key-list"></div>
+
+                                <div class="settings-codex-key-panic">
+                                    <button class="btn btn-danger" id="settings-codex-key-lockdown" type="button" title="Revoke every active key and require a key for all /v1 access.">Lockdown: revoke all keys</button>
+                                </div>
                             </div>
                         </section>
 
@@ -773,6 +780,7 @@
                 </div>
 
                 <!-- About Page -->
+                <div class="page" id="changelog-page"></div>
                 <div class="page" id="about-page"></div>
                 
             </main>
@@ -781,15 +789,15 @@
 
     <!-- Modular JavaScript -->
     <script src="/ui/js/core/theme.js?v=20250930222949"></script>
-    <script src="/ui/js/core/api.js?v=20260721"></script>
+    <script src="/ui/js/core/api.js?v=20260730"></script>
     <script src="/ui/js/core/rest-tools.js?v=20260721"></script>
     <script src="/ui/js/core/logs.js?v=20250930232705"></script>
-    <script src="/ui/js/components/navigation.js?v=20250930222949"></script>
+    <script src="/ui/js/components/navigation.js?v=20260730"></script>
     <script src="/ui/js/components/servers.js?v=20250930222949"></script>
     <script src="/ui/js/pages/config.js?v=20250930222949"></script>
     <script src="/ui/js/pages/skills.js?v=20260721"></script>
     <script src="/ui/js/pages/chat.js?v=202607211730"></script>
-    <script src="/ui/js/pages/settings.js?v=20260722"></script>
+    <script src="/ui/js/pages/settings.js?v=20260730"></script>
     <script src="/ui/js/core/globals.js?v=20250930222949"></script>
     <script src="/ui/js/core/app.js?v=20250930222949"></script>
 

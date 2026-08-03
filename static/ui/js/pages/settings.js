@@ -53,6 +53,7 @@ function getSettingsElements() {
         codexKeyCopy: document.getElementById('settings-codex-key-copy'),
         codexKeyDismiss: document.getElementById('settings-codex-key-dismiss'),
         codexKeyList: document.getElementById('settings-codex-key-list'),
+        codexKeyLockdown: document.getElementById('settings-codex-key-lockdown'),
         systemPromptInput: document.getElementById('settings-system-prompt-input'),
         systemPromptSave: document.getElementById('settings-system-prompt-save'),
         systemPromptStatus: document.getElementById('settings-system-prompt-status'),
@@ -649,19 +650,42 @@ function renderCodexAccessKeys() {
         const scopes = Array.isArray(record.scopes) ? record.scopes.join(', ') : '';
         const expires = record.expiresAt ? formatCodexKeyTime(record.expiresAt) : 'Never';
         const lastUsed = record.lastUsedAt ? formatCodexKeyTime(record.lastUsedAt) : 'Never';
-        metadata.textContent = 'Scopes: ' + scopes + ' · Expires: ' + expires + ' · Last used: ' + lastUsed;
+        let usageText = '';
+        if (record.usage && typeof record.usage.requests === 'number') {
+            usageText = ' · Requests: ' + record.usage.requests
+                + (record.usage.errors ? ' (' + record.usage.errors + ' errors)' : '')
+                + (record.usage.rateLimited ? ' (' + record.usage.rateLimited + ' rate-limited)' : '')
+                + ' since restart';
+        }
+        metadata.textContent = 'Scopes: ' + scopes + ' · Expires: ' + expires + ' · Last used: ' + lastUsed + usageText;
         details.append(heading, prefix, metadata);
         row.appendChild(details);
 
         const actions = document.createElement('div');
         actions.className = 'settings-codex-key-actions';
+
+        const rotate = document.createElement('button');
+        rotate.className = 'btn btn-secondary';
+        rotate.type = 'button';
+        rotate.textContent = 'Rotate';
+        rotate.title = 'Issue a new secret; the old token stops working immediately.';
+        rotate.addEventListener('click', () => rotateCodexAccessKey(record));
+
         const revoke = document.createElement('button');
         revoke.className = 'btn btn-danger';
         revoke.type = 'button';
         revoke.textContent = 'Revoke';
         revoke.disabled = record.status !== 'active';
         revoke.addEventListener('click', () => revokeCodexAccessKey(record));
-        actions.appendChild(revoke);
+
+        const remove = document.createElement('button');
+        remove.className = 'btn btn-danger';
+        remove.type = 'button';
+        remove.textContent = 'Delete';
+        remove.title = 'Purge this key from the registry entirely.';
+        remove.addEventListener('click', () => deleteCodexAccessKey(record));
+
+        actions.append(rotate, revoke, remove);
         row.appendChild(actions);
         codexKeyList.appendChild(row);
     });
@@ -788,6 +812,68 @@ async function revokeCodexAccessKey(record) {
         setCodexKeyStatus(label + ' revoked.', 'success');
     } catch (error) {
         setCodexKeyStatus(error?.message || 'Could not revoke Codex OAuth API key.', 'error');
+    }
+}
+
+async function rotateCodexAccessKey(record) {
+    const label = record?.name || record?.id;
+    if (!record?.id || !confirm('Rotate ' + label + '? The current token stops working immediately and a new one is shown once.')) {
+        return;
+    }
+    const els = getSettingsElements();
+    clearRevealedCodexKey();
+    setCodexKeyStatus('Rotating ' + label + '...');
+    try {
+        const endpoint = CODEX_ACCESS_KEYS_ENDPOINT + '/' + encodeURIComponent(record.id) + '/rotate';
+        const { response, data } = await fetchJson(endpoint, { method: 'POST' });
+        if (!response.ok || data?.ok !== true || typeof data.key !== 'string') {
+            throw new Error(settingsApiError(response, data, 'Could not rotate Codex OAuth API key'));
+        }
+        if (els.codexKeyValue) els.codexKeyValue.value = data.key;
+        if (els.codexKeyCreated) els.codexKeyCreated.hidden = false;
+        await loadCodexAccessKeys();
+        // loadCodexAccessKeys clears the revealed key; restore the rotated secret.
+        if (els.codexKeyValue) els.codexKeyValue.value = data.key;
+        if (els.codexKeyCreated) els.codexKeyCreated.hidden = false;
+        setCodexKeyStatus(label + ' rotated. Copy the new key now.', 'success');
+    } catch (error) {
+        setCodexKeyStatus(error?.message || 'Could not rotate Codex OAuth API key.', 'error');
+    }
+}
+
+async function lockdownCodexAccessKeys() {
+    if (!confirm('Lockdown: revoke ALL active keys and require a key for every /v1 request? Existing clients stop working immediately. This cannot be undone.')) {
+        return;
+    }
+    setCodexKeyStatus('Locking down...');
+    try {
+        const { response, data } = await fetchJson(CODEX_ACCESS_KEYS_ENDPOINT + '/lockdown', { method: 'POST' });
+        if (!response.ok || data?.ok !== true) {
+            throw new Error(settingsApiError(response, data, 'Could not lock down keys'));
+        }
+        await loadCodexAccessKeys();
+        setCodexKeyStatus('Locked down. ' + (data.revoked || 0) + ' key(s) revoked; /v1 now requires a key.', 'success');
+    } catch (error) {
+        setCodexKeyStatus(error?.message || 'Could not lock down keys.', 'error');
+    }
+}
+
+async function deleteCodexAccessKey(record) {
+    const label = record?.name || record?.id;
+    if (!record?.id || !confirm('Delete ' + label + ' permanently? This purges the key record and cannot be undone.')) {
+        return;
+    }
+    setCodexKeyStatus('Deleting ' + label + '...');
+    try {
+        const endpoint = CODEX_ACCESS_KEYS_ENDPOINT + '/' + encodeURIComponent(record.id);
+        const { response, data } = await fetchJson(endpoint, { method: 'DELETE' });
+        if (!response.ok || data?.ok !== true) {
+            throw new Error(settingsApiError(response, data, 'Could not delete Codex OAuth API key'));
+        }
+        await loadCodexAccessKeys();
+        setCodexKeyStatus(label + ' deleted.', 'success');
+    } catch (error) {
+        setCodexKeyStatus(error?.message || 'Could not delete Codex OAuth API key.', 'error');
     }
 }
 
@@ -939,6 +1025,7 @@ function bindSettingsHandlers() {
     els.codexKeyCreate?.addEventListener('click', createCodexAccessKey);
     els.codexKeyCopy?.addEventListener('click', copyCodexAccessKey);
     els.codexKeyDismiss?.addEventListener('click', dismissCodexAccessKey);
+    els.codexKeyLockdown?.addEventListener('click', lockdownCodexAccessKeys);
     els.codexKeyName?.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
             event.preventDefault();

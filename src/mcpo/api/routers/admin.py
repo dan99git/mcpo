@@ -1057,3 +1057,32 @@ async def set_code_mode(payload: CodeModeRequest, request: Request):
     state = get_state_manager()
     state.set_code_mode_enabled(payload.enabled)
     return {"ok": True, "enabled": state.is_code_mode_enabled()}
+
+
+# --- Changelog ---
+
+@router.get("/changelog")
+async def get_changelog():
+    """Serve CHANGELOG.md as raw markdown for the UI changelog page.
+
+    Dev layout: <project root>/CHANGELOG.md (admin.py is src/mcpo/api/routers/,
+    so parents[4] is the project root). Packaged fallback: alongside the mcpo
+    package (parents[2]), mirroring how THIRD_PARTY_NOTICES.md is force-included.
+    """
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    candidates = [
+        here.parents[4] / "CHANGELOG.md",  # dev checkout: src/mcpo/api/routers -> root
+        here.parents[2] / "CHANGELOG.md",  # installed package fallback
+    ]
+    for path in candidates:
+        try:
+            if path.is_file():
+                return {"ok": True, "content": path.read_text(encoding="utf-8")}
+        except Exception as e:
+            logger.warning("Failed reading changelog at %s: %s", path, e)
+    return JSONResponse(
+        status_code=404,
+        content={"ok": False, "error": {"message": "CHANGELOG.md not found", "code": "not_found"}},
+    )

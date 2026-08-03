@@ -36,6 +36,12 @@ class ModelAPIKeyCreateRequest(BaseModel):
     expires_at: Optional[str] = Field(None, alias="expiresAt")
 
 
+class ModelAPIKeyEnforcementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(...)
+
+
 def _store(request: Request) -> ModelAPIKeyStore:
     configured = getattr(request.app.state, "model_api_key_store", None)
     return (
@@ -100,13 +106,21 @@ def _reject_read_only(request: Request) -> None:
 async def list_model_api_keys(request: Request) -> Dict[str, Any]:
     _require_admin(request)
     try:
+        from mcpo.services.usage import get_usage_recorder
+
         store = _store(request)
+        usage = get_usage_recorder().snapshot()
+        keys = store.list_keys()
+        for record in keys:
+            record["usage"] = usage.get(record["id"])
         return {
             "ok": True,
             "providerId": CODEX_OAUTH_PROVIDER_ID,
             "oauth": codex_oauth_status(),
             "enforced": store.enforcement_enabled(),
-            "keys": store.list_keys(),
+            "keys": keys,
+            # Usage counters are in-memory, per worker process, reset on restart.
+            "usageScope": "process",
         }
     except ModelAPIKeyStoreError as exc:
         raise HTTPException(
@@ -166,6 +180,112 @@ async def revoke_model_api_key(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Model API key '{key_id}' was not found.",
         ) from exc
+    except ModelAPIKeyStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/{key_id}/rotate")
+async def rotate_model_api_key(
+    key_id: str,
+    request: Request,
+) -> Dict[str, Any]:
+    """Reissue a key's secret. Old token stops working immediately; the new
+    plaintext token is returned once."""
+    _require_admin(request)
+    _reject_read_only(request)
+    try:
+        key, record = _store(request).rotate_key(key_id)
+        return {
+            "ok": True,
+            "providerId": CODEX_OAUTH_PROVIDER_ID,
+            "key": key,
+            "record": record,
+        }
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model API key '{key_id}' was not found.",
+        ) from exc
+    except ModelAPIKeyStoreError as exc:
+        # Business-rule refusal (e.g. rotating a revoked key) -> 409 Conflict.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+@router.delete("/{key_id}")
+async def delete_model_api_key(
+    key_id: str,
+    request: Request,
+) -> Dict[str, Any]:
+    """Purge a key record entirely (no tombstone left in the registry)."""
+    _require_admin(request)
+    _reject_read_only(request)
+    try:
+        record = _store(request).delete_key(key_id)
+        return {
+            "ok": True,
+            "providerId": CODEX_OAUTH_PROVIDER_ID,
+            "record": record,
+        }
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Model API key '{key_id}' was not found.",
+        ) from exc
+    except ModelAPIKeyStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/lockdown")
+async def lockdown_model_api_keys(request: Request) -> Dict[str, Any]:
+    """Panic button: revoke every active key AND enable enforcement in one call.
+
+    After this, all existing client tokens are dead and /v1 requires a fresh key
+    (or the admin key). Irreversible for the revoked keys — issue new ones."""
+    _require_admin(request)
+    _reject_read_only(request)
+    try:
+        store = _store(request)
+        revoked = store.revoke_all_active()
+        return {
+            "ok": True,
+            "providerId": CODEX_OAUTH_PROVIDER_ID,
+            "revoked": revoked,
+            "enforced": store.enforcement_enabled(),
+        }
+    except ModelAPIKeyStoreError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/enforcement")
+async def set_model_api_key_enforcement(
+    payload: ModelAPIKeyEnforcementRequest,
+    request: Request,
+) -> Dict[str, Any]:
+    """Explicitly turn /v1 key enforcement on or off.
+
+    enabled=true with zero keys LOCKS DOWN /v1 (closes the open-by-default gap);
+    enabled=false unlatches enforcement that create_key() turned on."""
+    _require_admin(request)
+    _reject_read_only(request)
+    try:
+        enforced = _store(request).set_enforcement(payload.enabled)
+        return {
+            "ok": True,
+            "providerId": CODEX_OAUTH_PROVIDER_ID,
+            "enforced": enforced,
+        }
     except ModelAPIKeyStoreError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

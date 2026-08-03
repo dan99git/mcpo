@@ -319,6 +319,83 @@ class ModelAPIKeyStore:
                     raise
                 return token, self._public_record(record)
 
+    def set_enforcement(self, enabled: bool) -> bool:
+        """Turn model-key enforcement on or off explicitly.
+
+        create_key() latches enforcement on; nothing else ever turned it back
+        off, so a store that once held a key required a key forever (gap 2).
+        This also lets an admin LOCK DOWN /v1 before any key exists by enabling
+        enforcement with zero keys (closes the open-by-default gap when no admin
+        key is configured).
+        """
+        target = bool(enabled)
+        with self._lock:
+            with self._process_lock():
+                self._reload_if_present()
+                previous = self._enforced
+                if previous == target:
+                    return target
+                self._enforced = target
+                try:
+                    self._save()
+                except Exception:
+                    self._enforced = previous
+                    raise
+                return target
+
+    def delete_key(self, key_id: str) -> Dict[str, Any]:
+        """Permanently remove a key record (purge), returning its final public
+        form. Unlike revoke_key this leaves no trace in the registry file."""
+        normalized = str(key_id or "").strip().lower()
+        with self._lock:
+            with self._process_lock():
+                self._reload_if_present()
+                record = self._keys.get(normalized)
+                if record is None:
+                    raise KeyError(normalized)
+                snapshot = self._public_record(record)
+                previous = self._keys
+                self._keys = {k: v for k, v in self._keys.items() if k != normalized}
+                try:
+                    self._save()
+                except Exception:
+                    self._keys = previous
+                    raise
+                return snapshot
+
+    def rotate_key(self, key_id: str) -> tuple[str, Dict[str, Any]]:
+        """Issue a new secret for an existing ACTIVE key, keeping its id, name,
+        scopes and expiry. Old secret stops authenticating immediately. Returns
+        the new plaintext token once, same shape as create_key.
+
+        Refuses to rotate a revoked key: revocation is final, and silently
+        reactivating it via rotate would undo an incident response (audit MED-6).
+        Expired keys can be rotated (a fresh secret with the same past expiry is
+        still expired, so this is harmless and lets an admin extend by pairing
+        with a create)."""
+        normalized = str(key_id or "").strip().lower()
+        with self._lock:
+            with self._process_lock():
+                self._reload_if_present()
+                record = self._keys.get(normalized)
+                if record is None:
+                    raise KeyError(normalized)
+                if record.get("revokedAt"):
+                    raise ModelAPIKeyStoreError(
+                        "Cannot rotate a revoked key; create a new key instead."
+                    )
+                secret = secrets.token_urlsafe(32)
+                previous = deepcopy(record)
+                record["secretHash"] = hashlib.sha256(secret.encode("utf-8")).hexdigest()
+                record["lastUsedAt"] = None
+                token = f"{record['prefix']}.{secret}"
+                try:
+                    self._save()
+                except Exception:
+                    self._keys[normalized] = previous
+                    raise
+                return token, self._public_record(record)
+
     def revoke_key(self, key_id: str) -> Dict[str, Any]:
         normalized = str(key_id or "").strip().lower()
         with self._lock:
@@ -337,6 +414,31 @@ class ModelAPIKeyStore:
                     self._keys[normalized] = previous
                     raise
                 return self._public_record(record)
+
+    def revoke_all_active(self) -> int:
+        """Panic control: revoke every currently-active key and leave enforcement
+        ON so /v1 stays locked. Returns how many keys were revoked. Already
+        revoked/expired keys are left untouched."""
+        with self._lock:
+            with self._process_lock():
+                self._reload_if_present()
+                now = _utcnow()
+                stamp = _timestamp(now)
+                previous = deepcopy(self._keys)
+                previous_enforced = self._enforced
+                revoked = 0
+                for record in self._keys.values():
+                    if self._status(record, now) == "active":
+                        record["revokedAt"] = stamp
+                        revoked += 1
+                self._enforced = True
+                try:
+                    self._save()
+                except Exception:
+                    self._keys = previous
+                    self._enforced = previous_enforced
+                    raise
+                return revoked
 
     def authenticate(
         self,

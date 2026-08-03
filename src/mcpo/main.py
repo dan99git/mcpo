@@ -69,7 +69,7 @@ from mcpo.utils.config import (
 )
 from mcpo.utils.config_watcher import ConfigWatcher
 from mcpo.services.state import StateSaveError, get_state_manager
-from mcpo.services.model_api_keys import get_model_api_key_store
+from mcpo.services.model_api_keys import get_model_api_key_store, ModelAPIKeyStoreError
 from mcpo.services.logging import get_log_manager
 from mcpo.services.logging_handlers import BufferedLogHandler
 
@@ -2168,13 +2168,6 @@ async def build_main_app(
     main_app.state.shutdown_handler = shutdown_handler
     main_app.state.path_prefix = path_prefix
 
-    main_app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_allow_origins or ["*"],
-        allow_credentials=cors_allow_origins is not None and cors_allow_origins != ["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
     main_app.add_middleware(PackageArchiveBodyLimitMiddleware)
     main_app.add_middleware(ConfigTransactionMiddleware)
     main_app.add_middleware(ChatBodyLimitMiddleware)
@@ -2189,12 +2182,40 @@ async def build_main_app(
     if api_key and strict_auth:
         main_app.add_middleware(APIKeyMiddleware, api_key=api_key)
 
+    # CORS is added LAST so it is the OUTERMOST middleware; its headers then reach
+    # auth error responses (401/403/429) from the auth middlewares above, which
+    # short-circuit before inner middleware. Otherwise browser-based OpenAI
+    # clients see an opaque CORS failure instead of a readable status (audit MED-5).
+    main_app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_allow_origins or ["*"],
+        allow_credentials=cors_allow_origins is not None and cors_allow_origins != ["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
     # Register health endpoint early
     _register_health_endpoint(main_app)
 
     # Startup security / hardening audit warnings
     if not api_key and not read_only_mode:
         logger.warning("Security: Server running without API key and not in read-only mode – management endpoints are writable.")
+    # /v1 inference is open when there is no admin key AND model-key enforcement
+    # is off (no key has been created and lockdown was never enabled). Surface it
+    # loudly with the exact remediation instead of failing silently open.
+    if not api_key:
+        try:
+            _mk_store = getattr(main_app.state, "model_api_key_store", None) or get_model_api_key_store()
+            if not _mk_store.enforcement_enabled():
+                logger.warning(
+                    "Security: /v1 inference endpoints are UNAUTHENTICATED "
+                    "(no admin key, model-key enforcement off). Set MCPO_API_KEY "
+                    "and restart to protect them. (The key-management endpoints "
+                    "themselves require MCPO_API_KEY, so they cannot lock this "
+                    "down while it is unset.)"
+                )
+        except ModelAPIKeyStoreError as exc:
+            logger.warning("Security: could not read model API key store: %s", exc)
     if protocol_version_mode != "enforce":
         logger.info(f"Protocol negotiation not enforced (mode={protocol_version_mode}).")
     if validate_output_mode != "enforce":

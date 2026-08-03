@@ -330,6 +330,75 @@ async function loadAboutContent() {
     }
 }
 
+// Minimal markdown renderer for the changelog page (headings, lists, bold,
+// code blocks, inline code, links). Escapes all HTML first.
+function renderChangelogMarkdown(md) {
+    const escape = (s) => s
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+    const inline = (s) => s
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    const lines = escape(md).split(/\r?\n/);
+    const out = [];
+    let inList = false;
+    let inCode = false;
+    const closeList = () => { if (inList) { out.push('</ul>'); inList = false; } };
+
+    for (const line of lines) {
+        if (line.startsWith('```')) {
+            closeList();
+            out.push(inCode ? '</code></pre>' : '<pre><code>');
+            inCode = !inCode;
+            continue;
+        }
+        if (inCode) { out.push(line); continue; }
+        const h = line.match(/^(#{1,4})\s+(.*)$/);
+        if (h) {
+            closeList();
+            const level = Math.min(h[1].length + 1, 5); // demote: page h1 exists
+            out.push(`<h${level}>${inline(h[2])}</h${level}>`);
+            continue;
+        }
+        const li = line.match(/^\s*[-*]\s+(.*)$/);
+        if (li) {
+            if (!inList) { out.push('<ul>'); inList = true; }
+            out.push(`<li>${inline(li[1])}</li>`);
+            continue;
+        }
+        if (!line.trim()) { closeList(); continue; }
+        closeList();
+        out.push(`<p>${inline(line)}</p>`);
+    }
+    closeList();
+    if (inCode) out.push('</code></pre>');
+    return out.join('\n');
+}
+
+async function loadChangelogContent() {
+    const page = document.getElementById('changelog-page');
+    if (!page) return;
+    // Only load once per session
+    if (page.innerHTML.trim()) return;
+    try {
+        const resp = await fetch('/_meta/changelog');
+        const data = await resp.json();
+        if (resp.ok && data.ok && typeof data.content === 'string') {
+            page.innerHTML = `<div class="changelog-content">${renderChangelogMarkdown(data.content)}</div>`;
+        } else {
+            const msg = (data && data.error && data.error.message) || 'CHANGELOG.md not found.';
+            page.innerHTML = `<div class="empty-state">${msg}</div>`;
+        }
+    } catch (error) {
+        console.error('Error loading changelog:', error);
+        page.innerHTML = '<div class="empty-state">Failed to load changelog. Check that the server is running.</div>';
+    }
+}
+
 async function fetchSkills() {
     const catalog = await fetchSkillsCatalog();
     return catalog.skills;
@@ -501,6 +570,7 @@ window.saveConfigContent = saveConfigContent;
 window.installDependencies = installDependencies;
 window.saveRequirements = saveRequirements;
 window.loadAboutContent = loadAboutContent;
+window.loadChangelogContent = loadChangelogContent;
 window.fetchSkills = fetchSkills;
 window.fetchSkillsCatalog = fetchSkillsCatalog;
 window.fetchSkill = fetchSkill;

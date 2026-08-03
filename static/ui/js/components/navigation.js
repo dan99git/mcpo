@@ -8,6 +8,7 @@ const PAGE_HEADERS = {
     'logs-page': { title: 'Logs', subtitle: 'Server activity and debug information' },
     'config-page': { title: 'Configuration', subtitle: 'Server settings and client config export' },
     'settings-page': { title: 'Settings', subtitle: 'Code mode, authentication, and preferences' },
+    'changelog-page': { title: 'Changelog', subtitle: 'What changed, when, and how it was verified' },
     'about-page': { title: 'About', subtitle: 'Information about OpenHubUI' }
 };
 
@@ -65,6 +66,9 @@ function showPage(pageId) {
     try {
         if (targetId === 'about-page' && typeof window.loadAboutContent === 'function') {
             window.loadAboutContent();
+        }
+        if (targetId === 'changelog-page' && typeof window.loadChangelogContent === 'function') {
+            window.loadChangelogContent();
         }
         if (targetId === 'chat-page' && typeof window.initChatPage === 'function') {
             window.initChatPage();

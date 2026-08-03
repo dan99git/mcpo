@@ -1,5 +1,178 @@
 # Changelog
 
+All notable changes to this project are recorded here. Newest entry first.
+Every change set that touches `src/`, `static/`, `tests/`, or dependencies MUST
+add an entry under an `## Unreleased` heading in the same commit — enforced by
+`.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`).
+
+## Unreleased (trial/codex-keys) — 2026-07-31 (per-key usage accounting)
+
+### Added
+- Per-key usage accounting (`src/mcpo/services/usage.py`): requests, errors,
+  rate-limited count, per-path counts, last status/path/time — recorded by
+  `ModelAPIKeyMiddleware` on every model-key response (`src/mcpo/utils/auth.py`).
+  Answers "which client burned my Codex quota". In-memory by design (the audit
+  proved file writes in the auth hot path freeze the event loop): counters are
+  per worker process and reset on restart, declared via `"usageScope": "process"`
+  and `"sinceStartup": true` in responses. Admin-key requests are not counted.
+- Surfaced in: key list (`GET /chat/providers/codex-oauth/access-keys` — `usage`
+  per key), `GET /v1/whoami` (caller's own usage), and the Settings key rows
+  ("Requests: N (M errors) since restart", `static/ui/js/pages/settings.js`).
+- Deliberately absent: token counts — the middleware cannot read streaming bodies
+  without buffering them; token accounting belongs in the completions provider
+  if wanted later.
+
+### Verified
+- `tests/test_usage_accounting.py`: recorder counts requests/errors/429/paths;
+  middleware counts model-key requests and not admin; usage appears in key list
+  and whoami. Full suite 683 passed / 15 failed (same pre-existing) / 4 skipped.
+
+## Unreleased (trial/codex-keys) — 2026-07-30 (adversarial audit fixes)
+
+Fixes from an adversarial security audit of the Codex-OAuth key gateway. Auth
+bypass, scope escalation, path normalization, secret handling, SSRF and
+multi-process write safety were all probed and came back clean.
+
+### Fixed
+- HIGH: blocking file-locked store reads ran synchronously in async middleware, so
+  one worker holding the lock froze another worker's whole event loop (proven: an
+  unrelated request stalled 3.6s). `ModelAPIKeyMiddleware` now off-loads
+  `enforcement_enabled` and `authenticate` via `asyncio.to_thread`
+  (`src/mcpo/utils/auth.py`).
+- HIGH: a non-ASCII bearer token hit `hmac.compare_digest(str, str)` which raises
+  TypeError, returning a 500 that acted as a middleware oracle. New byte-safe
+  `_credentials_match` (`src/mcpo/utils/auth.py`) returns False instead of raising;
+  used for both Bearer and Basic admin compares.
+- MED: CORS was the innermost middleware, so 401/403/429 from auth carried no CORS
+  headers and browser clients saw opaque failures. CORS is now added last (outermost)
+  in `src/mcpo/main.py`. Live-verified: a 401 now returns `access-control-allow-origin`.
+- MED: `rotate_key` reset `revokedAt=None`, silently reactivating a revoked key.
+  It now refuses to rotate a revoked key (`ModelAPIKeyStoreError` -> 409 at the
+  endpoint) (`src/mcpo/services/model_api_keys.py`, router).
+- MED: the open-`/v1` startup warning pointed at an endpoint that returns 503 without
+  an admin key. Reworded to point at `MCPO_API_KEY` (`src/mcpo/main.py`).
+
+### Added
+- `X-RateLimit-Limit`/`X-RateLimit-Remaining` on successful model-key responses (not
+  just 429) so clients can back off early (`src/mcpo/utils/auth.py`).
+
+### Verified
+- Tests +3 (non-ASCII compare, rotate-revoked refusal + 409 endpoint, success rate
+  headers). Full suite 681 passed / 15 failed (same pre-existing) / 4 skipped.
+  Live: CORS header present on a 401 on :18007.
+
+### Audit findings deferred (flagged, not fixed)
+- MED: rate limiting lives only in `ModelAPIKeyMiddleware`, not the `get_verify_api_key`
+  dependency path (defense-in-depth; both are mounted today).
+- MED: no HTTP recovery path for a corrupt key registry (fails closed with 503).
+- LOW: auth timing leaks key-id existence (id is in the plaintext prefix anyway);
+  `_hits` dict never evicts empty deques (bounded to real key ids today).
+- Utility gaps ranked for later: per-key usage accounting, per-key quotas/model
+  allowlists, default key TTL, admin audit log, "revoke all except one".
+
+## Unreleased (trial/codex-keys) — 2026-07-30 (DX + panic controls)
+
+Two features beyond the gap fixes.
+
+### Added
+- `GET /v1/whoami` (`src/mcpo/api/routers/completions.py`): a client asks what its
+  credential can do — kind, scopes, status, expiry, last use, provider, active rate
+  limit — instead of guessing. Works for any active key regardless of scope (new
+  `ANY_SCOPE` sentinel in `src/mcpo/utils/auth.py`) and for the admin key (reports
+  unlimited). Live-verified on :18006: model key returns full JSON, unauth 401.
+- Panic lockdown: `ModelAPIKeyStore.revoke_all_active()` +
+  `POST /chat/providers/codex-oauth/access-keys/lockdown` (admin only) revokes every
+  active key AND pins enforcement on, in one call. UI button
+  `settings-codex-key-lockdown` (`static/ui/index.html`, `static/ui/js/pages/settings.js`).
+  Live-verified: admin lockdown revoked 1 key + enforced=true, model key got 403,
+  revoked token dead afterwards.
+
+### Verified
+- `tests/test_model_api_keys.py` (+2: whoami capabilities, lockdown revoke-all-and-
+  enforce). Full suite 678 passed / 15 failed (same pre-existing) / 4 skipped.
+  Browser: settings page loads with no console errors, lockdown button present.
+
+## Unreleased (trial/codex-keys) — 2026-07-30 (key lifecycle hardening)
+
+Closes gaps found in the Codex-OAuth model-API-key feature audit. All changes in
+the trial worktree.
+
+### Added
+- `ModelAPIKeyStore.set_enforcement(enabled)` (`src/mcpo/services/model_api_keys.py`)
+  + endpoint `POST /chat/providers/codex-oauth/access-keys/enforcement`
+  (`src/mcpo/api/routers/model_api_keys.py`). Unlatches the one-way enforcement
+  flag `create_key` used to pin on forever (gap 2), and lets an admin LOCK DOWN
+  `/v1` with zero keys — closing the open-by-default hole when no admin key is set
+  (gap 4/6).
+- `ModelAPIKeyStore.delete_key` (purge, no tombstone) + `DELETE /.../{key_id}`;
+  `ModelAPIKeyStore.rotate_key` (new secret, same id/scopes, reactivates a revoked
+  key) + `POST /.../{key_id}/rotate` (gap 3).
+- Per-key sliding-window rate limiter, `src/mcpo/services/rate_limit.py`, wired into
+  `ModelAPIKeyMiddleware` (`src/mcpo/utils/auth.py`). Off unless `MCPO_MODEL_KEY_RPM`
+  > 0; in-memory (never touches the key store on the hot path); admin key is never
+  limited; returns 429 + `Retry-After`/`X-RateLimit-*` headers. Per-worker window
+  (effective ceiling = limit × workers), documented in the module.
+- UI Rotate/Delete buttons on each key row (`static/ui/js/pages/settings.js`) with
+  the new secret revealed once on rotate.
+- Startup security warning when `/v1` is reachable unauthenticated
+  (`src/mcpo/main.py`): names the exact lockdown call.
+
+### Verified
+- `tests/test_model_api_keys.py` (new: enforcement toggle, delete purge, rotate incl.
+  revoked-key reactivation, all three endpoints + admin/read-only guards) and
+  `tests/test_rate_limit.py` (window allow/block/recover, 429 for model key, admin
+  exempt). Full suite: 676 passed / 15 failed (same 15 pre-existing; +9 new tests) /
+  4 skipped.
+
+### Not done (flagged, not faked)
+- In-app OpenAI/Codex OAuth login (gap 1). Codex credentials still come from the
+  Codex CLI writing `~/.codex/auth.json`; building a real PKCE + redirect flow is a
+  separate design, not bolted on here.
+
+## Unreleased (trial/fastmcp4) — 2026-07-30 (later)
+
+### Added
+- In-app Changelog page. New sidebar item between Settings and About; renders this
+  file. Backend: `GET /_meta/changelog` (`src/mcpo/api/routers/admin.py`) serves
+  the raw markdown. Frontend: `loadChangelogContent` + minimal HTML-escaping
+  markdown renderer in `static/ui/js/core/api.js`, nav wiring in
+  `static/ui/js/components/navigation.js`, page div in `static/ui/index.html`,
+  styles in `static/ui/css/layout.css`. Verified live on :18003 in Chrome —
+  page renders this entry, console clean.
+
+### Fixed (mcp 2.0 snake_case)
+- mcp 2.0 renamed model fields to snake_case; five camelCase accesses crashed the
+  OpenAPI-mode app at tool registration (`'Tool' object has no attribute
+  'inputSchema'`): `src/mcpo/main.py` + `src/mcpo/api/routers/tools.py`
+  (`input_schema`/`output_schema`), `src/mcpo/api/routers/chat.py`
+  (`input_schema`), `src/mcpo/services/runner.py` (`is_error`),
+  `src/mcpo/utils/main.py` (`mime_type`). Test mocks in six files updated to the
+  new attribute names. Full suite after: 15 failed (baseline was 16 — the
+  `is_error` fix also repaired `test_tool_timeout_behavior`), 668 passed.
+
+## Unreleased (trial/fastmcp4) — 2026-07-30
+
+MCP 2026-07-28 SDK stack trial: mcp 1.28.1 → 2.0.0, fastmcp 3.4.4 → 4.0.0b1.
+Trial worktree only (commits `2269c856` + `e4164428`); not merged to dev.
+
+### Dependencies
+- `pyproject.toml`: `mcp>=1.28,<2` → `mcp>=2,<3`; `fastmcp>=3.4.4,<3.5` → `fastmcp==4.0.0b1`; added `[tool.uv] prerelease = "allow"`. `uv.lock` regenerated (pulls in `mcp-types 2.0.0`, `httpx2`, `truststore`; drops `httpx-sse`).
+
+### Changed (upgrade compatibility)
+- `src/mcpo/main.py`: mcp 2.0 renamed `streamablehttp_client` → `streamable_http_client` and removed its `headers=` kwarg. Added a compat wrapper that carries headers on a pre-built httpx2 client via `create_mcp_http_client`; both call sites unchanged.
+- `src/mcpo/utils/main.py`: `McpError` renamed to `MCPError` in mcp 2.0; import aliased, catch sites unchanged.
+- `src/mcpo/api/routers/admin.py`: `FastMCP.as_proxy()` removed in fastmcp 4; both call sites now use `create_proxy()`.
+- `tests/test_stateless_proxy.py`: monkeypatch target moved from `FastMCP.as_proxy` to `fastmcp.server.create_proxy`.
+- `mcpo.json` (untracked, local): `time` server pinned `uvx --with "mcp<2" mcp-server-time` — upstream `mcp-server-time` crashes on import against mcp 2.x (its own env resolves latest mcp). This breakage is independent of the upgrade and also affects the current production stack.
+
+### Verified
+- Proxy suites: 69/69 pass on the new stack (`test_stateless_proxy`, `test_hot_reload`, `test_proxy_auth`, `test_oauth_self_hosted`, `test_mcp_middlewares`, `test_mcp_spec_2026`).
+- Full suite: 667 passed / 16 failed / 3 skipped — the identical 16 fail on the old stack (pre-existing, not upgrade-caused).
+- Live smoke on :18001 against real backends: legacy initialize + tools/list (desktop-commander, 26 tools; session id emitted), 2026-07-28 sessionless `server/discover` + `tools/list` (no session header; requires `MCP-Protocol-Version` + `mcp-method` headers and the `_meta` protocol envelope), state-disabled mounts return zero tools, pinned time server round-trips a real `get_current_time` call.
+
+### Known gaps
+- fastmcp 4.0.0b1 is a beta; elicitation forwarding through the proxy (PrefectHQ/fastmcp#3169, closed via #3172) is present in source but not live-tested here.
+
 ## Unreleased (feat/phase1-baseline)
 
 ### Architecture Consolidation (January 2025)

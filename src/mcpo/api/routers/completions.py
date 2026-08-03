@@ -26,7 +26,11 @@ from mcpo.services.codex_oauth import (
     codex_event_to_chat_chunks,
     codex_response_to_chat,
 )
-from mcpo.services.model_api_keys import CODEX_OAUTH_PROVIDER_ID
+from mcpo.services.model_api_keys import (
+    CODEX_OAUTH_PROVIDER_ID,
+    ModelAPIKeyStore,
+    get_model_api_key_store,
+)
 from mcpo.services.skills import compile_skills_system_prompt
 
 logger = logging.getLogger(__name__)
@@ -1572,10 +1576,57 @@ async def legacy_list_completion_models(request: Request):
     return await list_completion_models(request)
 
 
+@router.get("/whoami")
+async def whoami(request: Request):
+    """Introspect the calling credential. A client can ask 'what can this key do?'
+    without guessing: scopes, status, expiry, last use, provider, and the active
+    per-key rate limit. Admin key reports unlimited access. Auth is enforced by
+    ModelAPIKeyMiddleware (ANY_SCOPE), so reaching here means the caller is valid."""
+    principal = getattr(request.state, "auth_principal", None)
+    from mcpo.services.rate_limit import get_rate_limiter
+
+    limiter = get_rate_limiter()
+    rate = {"perMinute": limiter.limit} if limiter.enabled else {"perMinute": None}
+
+    if isinstance(principal, dict) and principal.get("kind") == "admin_api_key":
+        return {
+            "ok": True,
+            "kind": "admin_api_key",
+            "scopes": ["*"],
+            "rateLimit": {"perMinute": None},  # admin is never limited
+        }
+    if isinstance(principal, dict) and principal.get("kind") == "model_api_key":
+        key_id = str(principal.get("keyId") or "")
+        configured = getattr(request.app.state, "model_api_key_store", None)
+        store = configured if isinstance(configured, ModelAPIKeyStore) else get_model_api_key_store()
+        record = next((k for k in store.list_keys() if k["id"] == key_id), None)
+        body = {
+            "ok": True,
+            "kind": "model_api_key",
+            "keyId": key_id,
+            "providerId": principal.get("providerId"),
+            "scopes": principal.get("scopes", []),
+            "rateLimit": rate,
+        }
+        if record:
+            body.update(
+                name=record.get("name"),
+                status=record.get("status"),
+                expiresAt=record.get("expiresAt"),
+                lastUsedAt=record.get("lastUsedAt"),
+            )
+        from mcpo.services.usage import get_usage_recorder
+
+        body["usage"] = get_usage_recorder().snapshot(key_id)
+        return body
+    # Should be unreachable when the middleware is mounted; fail closed.
+    raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthenticated")
+
+
 @router.get("/models")
 async def list_models_root(request: Request):
     """OpenAI-compatible models list at the root of /v1 for OpenWebUI/OpenAI clients.
-    
+
     Only returns starred/favorite models if any are set.
     """
     models = await _list_models()

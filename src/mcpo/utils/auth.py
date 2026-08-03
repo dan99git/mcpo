@@ -7,9 +7,24 @@ from fastapi.security import (
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+import asyncio
 import base64
 import hmac
 import os
+
+
+def _credentials_match(supplied: str, expected: str) -> bool:
+    """Constant-time compare that never raises on non-ASCII input.
+
+    hmac.compare_digest(str, str) raises TypeError on non-ASCII characters; a
+    latin-1 bearer token otherwise crashed the middleware with a 500 that leaked
+    which middleware was in play. Encoding to bytes first is both raise-safe and
+    still constant-time.
+    """
+    try:
+        return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+    except (AttributeError, TypeError):
+        return False
 
 from mcpo.services.model_api_keys import (
     ModelAPIKeyStore,
@@ -24,6 +39,10 @@ bearer_security = HTTPBearer(auto_error=False)
 basic_security = HTTPBasic(auto_error=False)
 
 
+# Sentinel: path requires *any* active key (or the admin key), no specific scope.
+ANY_SCOPE = "*"
+
+
 def _model_api_scope(request: Request) -> str | None:
     method = request.method.upper()
     path = str(request.scope.get("path") or request.url.path)
@@ -36,6 +55,8 @@ def _model_api_scope(request: Request) -> str | None:
         "/v1/completions",
     }:
         return "responses:write"
+    if method == "GET" and path == "/v1/whoami":
+        return ANY_SCOPE
     if method == "GET" and path in {
         "/v1/models",
         "/v1/chat/completions/models",
@@ -64,14 +85,78 @@ def _authenticate_model_token(
     *,
     required_scope: str,
 ) -> bool:
+    scope_arg = None if required_scope == ANY_SCOPE else required_scope
     principal = _model_api_key_store(request).authenticate(
         token,
-        required_scope=required_scope,
+        required_scope=scope_arg,
     )
     if principal is None:
         return False
     request.state.auth_principal = principal
     return True
+
+
+def _enforce_rate_limit(request: Request):
+    """Apply the per-key sliding-window limit to an authenticated model-key
+    request. Returns a 429 JSONResponse when over budget, else None. Admin-key
+    principals are never rate limited."""
+    from mcpo.services.rate_limit import get_rate_limiter
+
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, dict) or principal.get("kind") != "model_api_key":
+        return None
+    limiter = get_rate_limiter()
+    if not limiter.enabled:
+        return None
+    identity = str(principal.get("keyId") or "")
+    allowed, remaining, retry_after = limiter.check(identity)
+    if allowed:
+        request.state.rate_limit_remaining = remaining
+        return None
+    retry_seconds = max(1, int(retry_after + 0.999))
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded for this key"},
+        headers={
+            "Retry-After": str(retry_seconds),
+            "X-RateLimit-Limit": str(limiter.limit),
+            "X-RateLimit-Remaining": "0",
+        },
+    )
+
+
+def _record_model_key_usage(request: Request, status_code: int) -> None:
+    """Count this request against the authenticated model key. In-memory only —
+    never touches the key-store file (see services/usage.py for why)."""
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, dict) or principal.get("kind") != "model_api_key":
+        return
+    from mcpo.services.usage import get_usage_recorder
+
+    path = str(request.scope.get("path") or request.url.path)
+    get_usage_recorder().record(
+        str(principal.get("keyId") or ""),
+        path=path,
+        status_code=status_code,
+    )
+
+
+def _annotate_rate_limit_headers(request: Request, response) -> None:
+    """Expose the per-key budget on successful responses so clients can back off
+    before they hit 429. No-op when the limiter is disabled or the principal is
+    not a model key. remaining reflects the hit already recorded by the check."""
+    principal = getattr(request.state, "auth_principal", None)
+    if not isinstance(principal, dict) or principal.get("kind") != "model_api_key":
+        return
+    from mcpo.services.rate_limit import get_rate_limiter
+
+    limiter = get_rate_limiter()
+    if not limiter.enabled:
+        return
+    remaining = getattr(request.state, "rate_limit_remaining", None)
+    response.headers["X-RateLimit-Limit"] = str(limiter.limit)
+    if isinstance(remaining, int) and remaining >= 0:
+        response.headers["X-RateLimit-Remaining"] = str(remaining)
 
 
 def get_verify_api_key(api_key: str):
@@ -215,7 +300,9 @@ class ModelAPIKeyMiddleware(BaseHTTPMiddleware):
 
         try:
             store = _model_api_key_store(request)
-            if not self.api_key and not store.enforcement_enabled():
+            # Off-load the blocking file-locked store read so a held lock in one
+            # worker never freezes this worker's event loop (audit HIGH-1).
+            if not self.api_key and not await asyncio.to_thread(store.enforcement_enabled):
                 return await call_next(request)
         except ModelAPIKeyStoreError as exc:
             return JSONResponse(status_code=503, content={"detail": str(exc)})
@@ -230,16 +317,25 @@ class ModelAPIKeyMiddleware(BaseHTTPMiddleware):
 
         if authorization.startswith("Bearer "):
             token = authorization[7:]
-            if self.api_key and hmac.compare_digest(token, self.api_key):
+            if self.api_key and _credentials_match(token, self.api_key):
                 _set_admin_principal(request)
                 return await call_next(request)
             try:
-                if _authenticate_model_token(
+                authed = await asyncio.to_thread(
+                    _authenticate_model_token,
                     request,
                     token,
                     required_scope=required_scope,
-                ):
-                    return await call_next(request)
+                )
+                if authed:
+                    limited = _enforce_rate_limit(request)
+                    if limited is not None:
+                        _record_model_key_usage(request, limited.status_code)
+                        return limited
+                    response = await call_next(request)
+                    _annotate_rate_limit_headers(request, response)
+                    _record_model_key_usage(request, response.status_code)
+                    return response
             except ModelAPIKeyStoreError as exc:
                 return JSONResponse(status_code=503, content={"detail": str(exc)})
             return JSONResponse(status_code=403, content={"detail": "Invalid API key"})
@@ -254,7 +350,7 @@ class ModelAPIKeyMiddleware(BaseHTTPMiddleware):
                     content={"detail": "Invalid Basic Authentication format"},
                     headers={"WWW-Authenticate": "Bearer, Basic"},
                 )
-            if hmac.compare_digest(password, self.api_key):
+            if _credentials_match(password, self.api_key):
                 _set_admin_principal(request)
                 return await call_next(request)
             return JSONResponse(

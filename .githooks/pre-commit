@@ -1,0 +1,29 @@
+#!/bin/sh
+# Blocks any commit that changes code without a CHANGELOG.md entry in the same commit.
+# Enable once per clone:  git config core.hooksPath .githooks
+# Scope: src/, static/, tests/, pyproject.toml, uv.lock. Docs-only commits are exempt.
+
+staged="$(git diff --cached --name-only)"
+
+code_changed=0
+for f in $staged; do
+    case "$f" in
+        src/*|static/*|tests/*|pyproject.toml|uv.lock)
+            code_changed=1
+            break
+            ;;
+    esac
+done
+
+if [ "$code_changed" -eq 0 ]; then
+    exit 0
+fi
+
+if echo "$staged" | grep -qx "CHANGELOG.md"; then
+    exit 0
+fi
+
+echo "COMMIT BLOCKED: code changes staged without a CHANGELOG.md entry." >&2
+echo "Add an entry under '## Unreleased' in CHANGELOG.md and stage it," >&2
+echo "then commit again. (Rule: every code change set carries its changelog.)" >&2
+exit 1

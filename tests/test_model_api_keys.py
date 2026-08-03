@@ -313,6 +313,249 @@ def test_generated_keys_enforce_scopes_and_filter_models(tmp_path, monkeypatch):
     }
 
 
+def test_set_enforcement_unlatches_and_locks_down(tmp_path):
+    path = tmp_path / "model-api-keys.json"
+    store = ModelAPIKeyStore(path)
+
+    # Lock down /v1 with zero keys (closes the open-by-default gap).
+    assert store.enforcement_enabled() is False
+    assert store.set_enforcement(True) is True
+    assert ModelAPIKeyStore(path).enforcement_enabled() is True
+
+    # Unlatch enforcement that create_key would otherwise pin forever.
+    assert store.set_enforcement(False) is False
+    assert ModelAPIKeyStore(path).enforcement_enabled() is False
+
+    # Idempotent: setting the same value twice is a no-op that still returns it.
+    assert store.set_enforcement(False) is False
+
+
+def test_delete_key_purges_record(tmp_path):
+    path = tmp_path / "model-api-keys.json"
+    store = ModelAPIKeyStore(path)
+    token, record = store.create_key(name="Purge me", scopes=["models:read"])
+
+    snapshot = store.delete_key(record["id"])
+    assert snapshot["id"] == record["id"]
+    # No tombstone: the record is gone from disk entirely, unlike revoke.
+    persisted = json.loads(path.read_text(encoding="utf-8"))
+    assert persisted["keys"] == []
+    assert store.authenticate(token, required_scope="models:read") is None
+
+    try:
+        store.delete_key(record["id"])
+    except KeyError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("deleting an unknown key must raise KeyError")
+
+
+def test_rotate_key_issues_new_secret_and_kills_old(tmp_path):
+    path = tmp_path / "model-api-keys.json"
+    store = ModelAPIKeyStore(path)
+    old_token, record = store.create_key(name="Rotate me", scopes=["responses:write"])
+
+    new_token, rotated = store.rotate_key(record["id"])
+    assert new_token != old_token
+    assert rotated["id"] == record["id"]
+    assert rotated["prefix"] == record["prefix"]  # id/prefix stable
+    assert store.authenticate(old_token, required_scope="responses:write") is None
+    assert store.authenticate(new_token, required_scope="responses:write") is not None
+    # Secret is never written in the clear.
+    assert new_token.split(".", 1)[1] not in path.read_text(encoding="utf-8")
+
+
+def test_rotate_refuses_to_resurrect_a_revoked_key(tmp_path):
+    """Revocation is final: rotating a revoked key must not silently reactivate it
+    (audit MED-6)."""
+    from mcpo.services.model_api_keys import ModelAPIKeyStoreError
+
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    old_token, record = store.create_key(name="Revoked", scopes=["models:read"])
+    store.revoke_key(record["id"])
+    try:
+        store.rotate_key(record["id"])
+    except ModelAPIKeyStoreError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("rotating a revoked key must raise")
+    # Still revoked, old token still dead.
+    assert store.list_keys()[0]["status"] == "revoked"
+    assert store.authenticate(old_token, required_scope="models:read") is None
+
+
+def test_enforcement_delete_rotate_endpoints(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        model_api_keys,
+        "codex_oauth_status",
+        lambda: {"ready": True, "source": "test"},
+    )
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    client = TestClient(_build_test_app(store))
+
+    created = client.post(
+        "/chat/providers/codex-oauth/access-keys",
+        headers=ADMIN_HEADERS,
+        json={"name": "Managed", "scopes": ["models:read"]},
+    )
+    key_id = created.json()["record"]["id"]
+    old_token = created.json()["key"]
+
+    # rotate via endpoint: new token works, old is dead
+    rotated = client.post(
+        f"/chat/providers/codex-oauth/access-keys/{key_id}/rotate",
+        headers=ADMIN_HEADERS,
+    )
+    assert rotated.status_code == 200
+    new_token = rotated.json()["key"]
+    assert new_token != old_token
+    assert store.authenticate(old_token, required_scope="models:read") is None
+    assert store.authenticate(new_token, required_scope="models:read") is not None
+
+    # enforcement toggle endpoint
+    off = client.post(
+        "/chat/providers/codex-oauth/access-keys/enforcement",
+        headers=ADMIN_HEADERS,
+        json={"enabled": False},
+    )
+    assert off.status_code == 200 and off.json()["enforced"] is False
+
+    # delete via endpoint purges
+    deleted = client.delete(
+        f"/chat/providers/codex-oauth/access-keys/{key_id}",
+        headers=ADMIN_HEADERS,
+    )
+    assert deleted.status_code == 200
+    assert deleted.json()["record"]["id"] == key_id
+    assert store.list_keys() == []
+
+    # unknown id -> 404 on both
+    assert client.delete(
+        f"/chat/providers/codex-oauth/access-keys/{key_id}",
+        headers=ADMIN_HEADERS,
+    ).status_code == 404
+    assert client.post(
+        f"/chat/providers/codex-oauth/access-keys/{key_id}/rotate",
+        headers=ADMIN_HEADERS,
+    ).status_code == 404
+
+
+def test_management_mutations_require_admin_and_respect_read_only(tmp_path):
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    _, record = store.create_key(name="Existing", scopes=["models:read"])
+    app = _build_test_app(store)
+    client = TestClient(app)
+
+    # no admin auth -> 401 on the new endpoints
+    assert client.delete(
+        f"/chat/providers/codex-oauth/access-keys/{record['id']}"
+    ).status_code == 401
+    assert client.post(
+        f"/chat/providers/codex-oauth/access-keys/{record['id']}/rotate"
+    ).status_code == 401
+    assert client.post(
+        "/chat/providers/codex-oauth/access-keys/enforcement",
+        json={"enabled": True},
+    ).status_code == 401
+
+    app.state.read_only_mode = True
+    ro = client.delete(
+        f"/chat/providers/codex-oauth/access-keys/{record['id']}",
+        headers=ADMIN_HEADERS,
+    )
+    assert ro.status_code == 403
+
+
+def test_whoami_reports_key_capabilities(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        model_api_keys,
+        "codex_oauth_status",
+        lambda: {"ready": True, "source": "test"},
+    )
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    token, record = store.create_key(name="Introspect", scopes=["responses:write"])
+    client = TestClient(_build_test_app(store))
+
+    # Unauthenticated whoami is rejected.
+    assert client.get("/v1/whoami").status_code == 401
+
+    # A responses-only key (no models:read) can still introspect itself.
+    resp = client.get("/v1/whoami", headers={"Authorization": f"Bearer {token}"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["kind"] == "model_api_key"
+    assert body["keyId"] == record["id"]
+    assert body["scopes"] == ["responses:write"]
+    assert body["status"] == "active"
+    assert body["name"] == "Introspect"
+
+    # Admin key reports admin, unlimited.
+    admin = client.get("/v1/whoami", headers=ADMIN_HEADERS)
+    assert admin.status_code == 200
+    assert admin.json()["kind"] == "admin_api_key"
+    assert admin.json()["rateLimit"]["perMinute"] is None
+
+
+def test_lockdown_revokes_all_and_enforces(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        model_api_keys,
+        "codex_oauth_status",
+        lambda: {"ready": True, "source": "test"},
+    )
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    t1, _ = store.create_key(name="A", scopes=["models:read"])
+    t2, r2 = store.create_key(name="B", scopes=["models:read"])
+    store.revoke_key(r2["id"])  # already-revoked key should not be counted again
+
+    client = TestClient(_build_test_app(store))
+    resp = client.post(
+        "/chat/providers/codex-oauth/access-keys/lockdown",
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["revoked"] == 1  # only the one still-active key
+    assert body["enforced"] is True
+    assert store.authenticate(t1, required_scope="models:read") is None
+    # Enforcement stays on even though all keys are now revoked.
+    assert store.enforcement_enabled() is True
+
+    # Lockdown requires admin.
+    assert client.post(
+        "/chat/providers/codex-oauth/access-keys/lockdown"
+    ).status_code == 401
+
+
+def test_non_ascii_credentials_compare_false_not_raise():
+    """hmac.compare_digest raises TypeError on non-ASCII str, which crashed the
+    middleware with a 500 (audit HIGH-2). The guarded compare must return False
+    instead of raising for any non-ASCII / non-str input."""
+    from mcpo.utils.auth import _credentials_match
+
+    assert _credentials_match("évil-token", "admin-secret") is False
+    assert _credentials_match("admin-secret", "admin-secret") is True
+    assert _credentials_match("\xe9\xe9\xe9", "admin-secret") is False
+    # Matching non-ASCII secrets still compare equal without raising.
+    assert _credentials_match("clé-secrète", "clé-secrète") is True
+
+
+def test_endpoint_rotate_of_revoked_key_returns_409(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        model_api_keys,
+        "codex_oauth_status",
+        lambda: {"ready": True, "source": "test"},
+    )
+    store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
+    _, record = store.create_key(name="Revoked", scopes=["models:read"])
+    store.revoke_key(record["id"])
+    client = TestClient(_build_test_app(store))
+    resp = client.post(
+        f"/chat/providers/codex-oauth/access-keys/{record['id']}/rotate",
+        headers=ADMIN_HEADERS,
+    )
+    assert resp.status_code == 409
+
+
 def test_generated_key_auth_is_enforced_under_asgi_mount(tmp_path, monkeypatch):
     store = ModelAPIKeyStore(tmp_path / "model-api-keys.json")
     token, _ = store.create_key(name="Mounted client", scopes=["models:read"])
