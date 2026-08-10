@@ -84,25 +84,31 @@ def setup_file_logging(mode: str, port: int) -> Optional[RotatingFileHandler]:
 
 
 def reattach_uvicorn_file_handlers() -> None:
-    """Re-attach root file handlers to uvicorn's non-propagating loggers.
+    """Re-attach root file + UI buffer handlers to uvicorn's loggers.
 
     uvicorn's default dictConfig (applied inside ``uvicorn.Config.__init__``)
     sets ``propagate=False`` on ``uvicorn``/``uvicorn.access`` and clears any
     handlers previously attached to them, so their records never reach the
     root logger. Call this AFTER constructing ``uvicorn.Config`` so access
-    and error lines land in the log file as well.
+    and error lines land in the log file AND the in-memory UI log buffer
+    (BufferedLogHandler) — the pre-Config attachments both apps make are
+    wiped by the same dictConfig.
     """
+    from mcpo.services.logging_handlers import BufferedLogHandler
+
     root_logger = logging.getLogger()
-    file_handlers = [
-        h for h in root_logger.handlers if isinstance(h, RotatingFileHandler)
+    handlers = [
+        h
+        for h in root_logger.handlers
+        if isinstance(h, (RotatingFileHandler, BufferedLogHandler))
     ]
-    if not file_handlers:
+    if not handlers:
         return
     # "uvicorn.error" propagates to "uvicorn" (which has propagate=False), so
     # attaching to "uvicorn" covers error records without double-writing them.
     for logger_name in ("uvicorn", "uvicorn.access"):
         logger_obj = logging.getLogger(logger_name)
-        for handler in file_handlers:
+        for handler in handlers:
             if handler not in logger_obj.handlers:
                 logger_obj.addHandler(handler)
 

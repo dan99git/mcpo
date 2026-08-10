@@ -5,6 +5,22 @@ Every change set that touches `src/`, `static/`, `tests/`, or dependencies MUST
 add an entry under an `## Unreleased` heading in the same commit — enforced by
 `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`).
 
+## Unreleased (dev) — 2026-08-10 (UI log buffer loses uvicorn lines)
+
+### Fixed
+- The in-UI log view silently missed all uvicorn access/error lines: uvicorn's
+  dictConfig (inside `uvicorn.Config.__init__`) wipes handler attachments, and
+  only the rotating FILE handler was being reattached afterwards.
+  `reattach_uvicorn_file_handlers` (`src/mcpo/services/file_logging.py`) now
+  reattaches `BufferedLogHandler` too, covering every existing call site in
+  serve and proxy. Found by the file-logging worker on 2026-08-03, flagged as
+  pre-existing then; fixed now.
+
+### Verified
+- New `tests/test_ui_log_buffer_reattach.py` (2 tests): buffer proven severed
+  by a simulated dictConfig wipe, restored after reattach, idempotent on
+  double-call. Full suite 779 passed / 0 failed / 2 skipped.
+
 ## Unreleased (dev) — 2026-08-10 (watchdog startup race + port-8000 auth posture)
 
 ### Fixed
