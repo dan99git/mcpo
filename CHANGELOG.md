@@ -5,6 +5,33 @@ Every change set that touches `src/`, `static/`, `tests/`, or dependencies MUST
 add an entry under an `## Unreleased` heading in the same commit — enforced by
 `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`).
 
+## Unreleased (dev) — 2026-08-10 (watchdog startup race + port-8000 auth posture)
+
+### Fixed
+- Watchdog startup race (`tools/watchdog.ps1`): the first probe cycle fired
+  seconds after `start.bat` launched the services, before their listeners
+  bound, spawning duplicate consoles (observed 2026-08-01 21:20:56 and
+  21:26:02). New `StartupGraceSeconds` (default 90): a service never yet seen
+  alive is not restarted inside the grace window. Services seen alive once are
+  restarted immediately as before.
+
+### Changed
+- Port 8000 posture (`start.bat` + watchdog mirror, authored in a prior Codex
+  session, committed here): `--strict-auth` removed because it has no path
+  exemptions and made `/ui` unreachable from a browser; compensated by binding
+  8000 to 127.0.0.1 (local-only). Production exposure remains the 8351 OAuth
+  tunnel. `--api-key` auth on 8000/8001 unchanged.
+- `mcpo_state.json`: removed 4 entries naming servers absent from mcpo.json
+  (`mcpo`, `new`, `new_server`, `s1` — test-write leftovers from before the
+  state-isolation fixes). All 23 real server entries byte-identical. Original
+  archived at `.archive/2026-08-10/mcpo_state.json`. (State file is gitignored;
+  recorded here for the audit trail.)
+
+### Verified
+- Parse check clean; dry-run with `-StartupGraceSeconds 6 -IntervalSeconds 7
+  -MaxCycles 2`: cycle 1 logged "inside startup grace - not restarting" for the
+  two dead ports, cycle 2 (grace expired) escalated to DOWN + would-relaunch.
+
 ## Unreleased (dev) — 2026-08-03 (persistent rotating file logs)
 
 ### Added

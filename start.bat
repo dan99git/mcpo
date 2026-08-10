@@ -58,9 +58,15 @@ rem Log files are owned by the apps themselves (rotating file logging in
 rem src/mcpo/services/file_logging.py): logs\openapi.log, logs\proxy-8001.log,
 rem logs\proxy-8351.log. Do NOT truncate them here; they persist across restarts.
 
-rem If MCPO_API_KEY is set, enforce auth on port 8000 (admin + completions)
+rem If MCPO_API_KEY is set, enforce auth on port 8000 (admin + completions).
+rem NO --strict-auth here: it has no path exemptions (src\mcpo\utils\auth.py
+rem APIKeyMiddleware), so it also blocks the /ui static mount, and a browser
+rem navigation sends no Authorization header. The Admin UI this script advertises
+rem below is unreachable with it on. Port 8000 is bound to 127.0.0.1 instead, so
+rem /ui, /docs and /_meta are reachable from this machine only. Production
+rem exposure is the 8351 OAuth tunnel, which is unaffected.
 set "AUTH_FLAGS="
-if defined MCPO_API_KEY set "AUTH_FLAGS=--api-key %MCPO_API_KEY% --strict-auth"
+if defined MCPO_API_KEY set "AUTH_FLAGS=--api-key %MCPO_API_KEY%"
 
 rem If MCPO_API_KEY is set, enforce auth on port 8001 (MCP streamable HTTP proxy)
 set "PROXY_AUTH_FLAGS="
@@ -83,7 +89,7 @@ rem To enable: Uncomment and update path below
 rem start "Whisper WIN 8002" cmd /k "cd /d %ROOT%\dev\audio\whisper-server\WIN & set AUTH_TOKEN=top-secret & set PORT=8002 & %PY_EXE% api_server.py"
 
 rem Start MCPO Admin (FastAPI) on port 8000 in a new console window
-start "MCPO Admin 8000" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo serve --config %ROOT%\mcpo.json --host 0.0.0.0 --port 8000 --hot-reload --env-path %ROOT%\.env --log-level debug %AUTH_FLAGS%"
+start "MCPO Admin 8000" cmd /k "cd /d %ROOT% & set PYTHONPATH=%ROOT%\src & %PY_EXE% -m mcpo serve --config %ROOT%\mcpo.json --host 127.0.0.1 --port 8000 --hot-reload --env-path %ROOT%\.env --log-level debug %AUTH_FLAGS%"
 
 rem Start MCPP Proxy (Streamable HTTP) on port 8001 in a new console window
 rem --hot-reload watches structural mcpo.json changes. Shared state toggles are

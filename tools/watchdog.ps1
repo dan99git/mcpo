@@ -5,9 +5,9 @@
 .DESCRIPTION
   Probes the three services start.bat launches:
     - 8000 MCPO Admin  : GET http://localhost:8000/healthz, expect HTTP 200
-                         (sends Bearer MCPO_API_KEY when set - strict auth
-                         guards /healthz too, see src/mcpo/utils/auth.py
-                         APIKeyMiddleware)
+                         (sends Bearer MCPO_API_KEY when set; harmless now that
+                         port 8000 runs without --strict-auth, kept so the probe
+                         still works if strict auth is ever restored)
     - 8001 MCPP Proxy  : TCP listen check (no health route on the proxy)
     - 8351 MCPO OAuth  : TCP listen check
 
@@ -33,6 +33,13 @@
   After a restart, skip probing that service for this long so a slow startup
   is not counted as another crash. Default 45.
 
+.PARAMETER StartupGraceSeconds
+  After the watchdog starts, a service that has never yet been seen alive is
+  NOT restarted for this long. start.bat launches the watchdog in the same
+  breath as the services; without this the first probe fires seconds before
+  the listeners bind and spawns duplicate consoles (race observed 2026-08-01
+  at 21:20:56 and 21:26:02, one duplicate admin shell each time). Default 90.
+
 .PARAMETER MaxCycles
   Stop after N probe cycles (testing aid). 0 = run forever. Default 0.
 
@@ -44,6 +51,7 @@ param(
     [switch]$DryRun,
     [int]$IntervalSeconds = 15,
     [int]$RestartGraceSeconds = 45,
+    [int]$StartupGraceSeconds = 90,
     [int]$MaxRestarts = 3,
     [int]$RestartWindowSeconds = 300,
     [int]$MaxCycles = 0
@@ -81,7 +89,10 @@ $ApiKey = $env:MCPO_API_KEY
 $AuthFlags = ''        # start.bat AUTH_FLAGS (port 8000)
 $ProxyAuthFlags = ''   # start.bat PROXY_AUTH_FLAGS (port 8001)
 if ($ApiKey) {
-    $AuthFlags = "--api-key $ApiKey --strict-auth"
+    # No --strict-auth on 8000: it has no path exemptions and blocks the /ui
+    # static mount, making the Admin UI unreachable from a browser. Port 8000
+    # binds 127.0.0.1 instead. Must stay in step with start.bat AUTH_FLAGS.
+    $AuthFlags = "--api-key $ApiKey"
     $ProxyAuthFlags = "--api-key $ApiKey"
 }
 
@@ -94,7 +105,7 @@ $Services = @(
         Port    = 8000
         Check   = 'http'
         Url     = 'http://localhost:8000/healthz'
-        Command = "cd /d $Root & set PYTHONPATH=$Root\src & $PyExe -m mcpo serve --config $Root\mcpo.json --host 0.0.0.0 --port 8000 --hot-reload --env-path $Root\.env --log-level debug $AuthFlags".TrimEnd()
+        Command = "cd /d $Root & set PYTHONPATH=$Root\src & $PyExe -m mcpo serve --config $Root\mcpo.json --host 127.0.0.1 --port 8000 --hot-reload --env-path $Root\.env --log-level debug $AuthFlags".TrimEnd()
     },
     @{
         Name    = 'MCPP Proxy 8001'
@@ -118,6 +129,7 @@ foreach ($svc in $Services) {
         LastRestart  = $null
         GivenUp      = $false
         LastStatus   = $null
+        SeenUp       = $false
     }
 }
 
@@ -187,7 +199,8 @@ function Invoke-ServiceRestart {
 }
 
 # --- Startup ----------------------------------------------------------------
-Write-Log 'INFO' ("Watchdog starting. PID={0} DryRun={1} Interval={2}s Grace={3}s Cap={4}/{5}s Python={6} AuthFlags={7}" -f $PID, [bool]$DryRun, $IntervalSeconds, $RestartGraceSeconds, $MaxRestarts, $RestartWindowSeconds, $PyExe, $(if ($ApiKey) { 'enabled' } else { 'none' }))
+$WatchdogStart = Get-Date
+Write-Log 'INFO' ("Watchdog starting. PID={0} DryRun={1} Interval={2}s Grace={3}s StartupGrace={4}s Cap={5}/{6}s Python={7} AuthFlags={8}" -f $PID, [bool]$DryRun, $IntervalSeconds, $RestartGraceSeconds, $StartupGraceSeconds, $MaxRestarts, $RestartWindowSeconds, $PyExe, $(if ($ApiKey) { 'enabled' } else { 'none' }))
 
 if (-not $DryRun) {
     Set-Content -Path $PidFile -Value $PID
@@ -208,6 +221,7 @@ try {
             }
 
             $status = Test-ServiceStatus -Svc $svc
+            if ($status -ne 'dead') { $st.SeenUp = $true }
 
             if ($status -ne $st.LastStatus) {
                 if ($status -eq 'healthy') {
@@ -219,6 +233,10 @@ try {
             }
 
             if ($status -eq 'dead') {
+                if (-not $st.SeenUp -and ((Get-Date) - $WatchdogStart).TotalSeconds -lt $StartupGraceSeconds) {
+                    Write-Log 'INFO' ("{0} not up yet, inside startup grace ({1}s) - not restarting" -f $svc.Name, $StartupGraceSeconds)
+                    continue
+                }
                 Write-Log 'ALERT' ("{0} is DOWN (port {1}, {2} check failed)" -f $svc.Name, $svc.Port, $svc.Check)
                 Invoke-ServiceRestart -Svc $svc
             }
