@@ -50,6 +50,7 @@ Change configuration without restarting—servers reconnect automatically.
 ## 📋 Table of Contents
 - [Quick Start](#quick-start)
 - [Architecture](#architecture)
+- [How It Actually Works](#-how-it-actually-works-read-this-before-changing-anything)
 - [Configuration](#configuration)
 - [OpenWebUI Integration](#openwebui-integration)
 - [Development Roadmap](#development-roadmap)
@@ -99,10 +100,99 @@ token enforcement, and public URL handling. The `/global` route on port
 
 ---
 
+## 🔍 How It Actually Works (read this before changing anything)
+
+Functional ground truth for humans and agents. Each claim below matches the
+code as of 2026-08-10; if you change the behavior, change this section in the
+same change set.
+
+### Processes
+
+`start.bat` launches four consoles; `stop.bat` tears them down (watchdog first
+so it cannot resurrect services mid-stop):
+
+| Process | Port | Bind | What it is |
+|---------|------|------|------------|
+| `mcpo serve` | 8000 | **127.0.0.1 only** | REST/OpenAPI proxy, Admin UI (`/ui`), management API (`/_meta/*`), chat + `/v1` completions. `--api-key` auth, deliberately NOT `--strict-auth` (strict has no path exemptions and blocks `/ui` in a browser; localhost bind compensates) |
+| `mcpo.proxy` | 8001 | 0.0.0.0 | Plain MCP streamable-http proxy. Aggregate at `/mcp` (alias `/global`), per-server at `/{server-name}/` — **no `/mcp` suffix on per-server mounts** |
+| `mcpo.proxy --oauth` | 8351 | 127.0.0.1 | Same MCP surface + self-hosted OAuth for ChatGPT/Claude remote connectors, published via Cloudflare tunnel (`--public-url`) |
+| `tools/watchdog.ps1` | — | — | Restarts ONLY a dead service. 90s startup grace (never-seen-alive services are not restarted early — prevents the duplicate-console race), 45s post-restart grace, max 3 restarts per 5 min then loud give-up. Logs to `logs/watchdog.log` |
+
+### Toggles and state — the part people get wrong
+
+- **Per-server toggle** (Admin UI server row) = that server off EVERYWHERE:
+  REST unmounted AND stripped from both MCP proxies. Enforced per-request.
+- **Per-tool toggles** = same, for a single tool.
+- **"REST Tools" toggle** (top bar) = kills ONLY port-8000 REST tool
+  endpoints (403). MCP proxying on 8001/8351 is deliberately unaffected. It
+  exists to silently drop OpenAPI exposure, not to disable servers.
+- All of it persists in `mcpo_state.json` (gitignored, repo root). The MCP
+  proxies re-read it per request via file-signature check, so toggles apply
+  across processes without restarts. Unknown servers/tools default to
+  enabled (fail-open) — do not rely on state entries existing.
+- Disabled servers push NOTHING to models: chat sessions revalidate their
+  cached tool catalog against a state signature on every message, and
+  code-mode `search_tools` filters at serve time.
+
+### MCP protocol status
+
+- SDK stack: `mcp` 2.x + `fastmcp` 4.x — the **MCP 2026-07-28 spec**
+  (sessionless streamable-http, `server/discover`, `Mcp-Method`/`Mcp-Name`
+  headers, cacheable `tools/list` with `ttlMs`/`cacheScope`). Old
+  2025-06-18 clients still work: the proxy mirrors the client's protocol
+  era and negotiates independently with each backend.
+- Unpinned `uvx` Python MCP servers that import `McpError` crash since mcp
+  2.0 hit PyPI — pin them in `mcpo.json` args (see the `time` entry:
+  `--from mcp-server-time==... --with mcp==1.29.0`).
+
+### Auth surfaces (three, independent)
+
+1. `MCPO_API_KEY` (`.env`) — shared admin key for 8000/8001. Local trust.
+2. Self-hosted OAuth on 8351 — for ChatGPT/Claude connectors; token state
+   persists to disk.
+3. Model API keys (Settings → Codex access keys) — per-client keys for
+   `/v1/*`, with enforcement toggle, rotate/revoke/delete, panic lockdown,
+   per-key rate limits and usage counters, `GET /v1/whoami` introspection.
+
+### Debugging
+
+- Rotating file logs (5 MB × 3, tracebacks included, survive restarts):
+  `logs/openapi.log`, `logs/proxy-8001.log`, `logs/proxy-8351.log`.
+- UI log view = in-memory ring buffer, wiped on restart; files are the
+  durable record.
+- `GET /healthz` on 8000: per-server connection status + reload generation.
+
+### Local vs Docker
+
+- **Local = development.** `start.bat`, live code, hot-reload, `.env`.
+- **Docker = shippable per-site gateway** (8351 surface only).
+  `Dockerfile.gateway-poc` bakes `src/` + `static/` into the image: **every
+  code change requires an image rebuild** (`docker compose -f
+  docker-compose.gateway-poc.yml build`). Container credentials live in
+  `.env.gateway-poc` (`MCPO_GATEWAY_CONSENT_KEY`), separate from local
+  `.env` — rotate them independently. Rebuild at verified checkpoints
+  (clean tree + green suite), not per-edit.
+
+### Rules for agents working in this repo
+
+- `CLAUDE.md` (repo root) is binding: every change set touching `src/`,
+  `static/`, `tests/`, `pyproject.toml` or `uv.lock` must add a
+  `CHANGELOG.md` entry in the same commit — enforced by
+  `.githooks/pre-commit` (`git config core.hooksPath .githooks`;
+  `--no-verify` is prohibited).
+- Never delete repo content — archive into `.archive/YYYY-MM-DD/`.
+- Session diaries live in `.claude/diary-YYYY-MM-DD.md`; read the current
+  one before continuing prior work.
+- `mcpo.json` (gitignored) uses a wrapped shape locally:
+  `{"config": {"mcpServers": {...}}, "server": ...}` — the standard flat
+  `{"mcpServers": ...}` shape is also accepted and normalized.
+
+---
+
 ## 🚀 Quick Start
 
 ### Prerequisites
-- Python 3.8+
+- Python 3.11+
 - Node.js (for npx-based MCP servers)
 - `uv` (recommended) or `pip`
 
