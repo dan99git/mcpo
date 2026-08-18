@@ -15,7 +15,7 @@ services:
       - ./static:/app/static:rw
       # Optional: Mount logs directory for persistence
       - mcpo_logs:/app/logs
-    command: ["--config", "mcpo.json", "--hot-reload", "--port", "8000"]
+    command: ["serve", "--config", "mcpo.json", "--hot-reload", "--port", "8000"]
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f -H \"Authorization: Bearer $${MCPO_API_KEY}\" http://localhost:8000/healthz"]

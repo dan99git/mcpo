@@ -4,7 +4,7 @@ Admin router for server management and configuration operations.
 import asyncio
 import logging
 import re
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, APIRouter, Depends, Request, HTTPException
 from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
@@ -70,6 +70,11 @@ class SkillUpsertRequest(BaseModel):
     title: str = Field(..., description="Display name")
     description: str = Field("", description="Short description")
     content: str = Field(..., description="Skill markdown body")
+    priority: int = Field(100, description="Sort priority (lower = first)")
+    scopes: Optional[List[str]] = Field(None, description="Scopes: chat, completions")
+    providers: Optional[List[str]] = Field(None, description="Provider filter")
+    models: Optional[List[str]] = Field(None, description="Model filter patterns")
+    tags: Optional[List[str]] = Field(None, description="Freeform tags")
 
 
 class SkillArchiveRequest(BaseModel):
@@ -680,6 +685,7 @@ def _skill_payload(skill, *, include_content: bool = True) -> Dict[str, Any]:
         "models": skill.models or [],
         "tags": skill.tags or [],
         "sourcePath": skill.source_path,
+        "folder": skill.folder,
         "sourceKind": skill.source_kind,
         "packageId": skill.package_id,
         "format": skill.format,
@@ -729,6 +735,11 @@ async def upsert_agent_skill(payload: SkillUpsertRequest, request: Request):
             title=payload.title,
             description=payload.description,
             content=payload.content,
+            priority=payload.priority,
+            scopes=payload.scopes,
+            providers=payload.providers,
+            models=payload.models,
+            tags=payload.tags,
         )
         return {
             "ok": True,

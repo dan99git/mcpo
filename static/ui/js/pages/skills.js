@@ -1,4 +1,4 @@
-/* MCPO Skills Page and package installer */
+/* MCPO Skills Page — split-panel layout with folder grouping and package installer */
 
 const skillsState = {
     initialized: false,
@@ -22,6 +22,7 @@ const skillsState = {
     skillPackagePayload: null,
     skillPackages: null,
     toolPreview: null,
+    collapsedFolders: new Set(),
 };
 
 const MAX_SKILL_PACKAGE_BYTES = 10 * 1024 * 1024;
@@ -41,6 +42,11 @@ function getSkillsElements() {
         idInput: document.getElementById('skills-id-input'),
         titleInput: document.getElementById('skills-title-input'),
         descInput: document.getElementById('skills-description-input'),
+        priorityInput: document.getElementById('skills-priority-input'),
+        scopesInput: document.getElementById('skills-scopes-input'),
+        providersInput: document.getElementById('skills-providers-input'),
+        modelsInput: document.getElementById('skills-models-input'),
+        sourcePath: document.getElementById('skills-source-path'),
         contentInput: document.getElementById('skills-content-input'),
         installer: document.getElementById('skills-installer'),
         installerCloseBtn: document.getElementById('skills-installer-close-btn'),
@@ -118,6 +124,37 @@ function formatBytes(value) {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+// --- Helpers ---
+
+function csvToArray(str) {
+    return (str || '').split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function arrayToCsv(arr) {
+    return (arr || []).join(', ');
+}
+
+/** Group skills by folder. Returns Map<string, skill[]> preserving insertion order. */
+function groupByFolder(skills) {
+    const groups = new Map();
+    for (const skill of skills) {
+        const folder = skill.folder || '';
+        if (!groups.has(folder)) groups.set(folder, []);
+        groups.get(folder).push(skill);
+    }
+    // Sort: root ("") first, then folders alphabetically
+    const sorted = new Map();
+    if (groups.has('')) {
+        sorted.set('', groups.get(''));
+        groups.delete('');
+    }
+    const folderKeys = [...groups.keys()].sort();
+    for (const key of folderKeys) {
+        sorted.set(key, groups.get(key));
+    }
+    return sorted;
+}
+
 // --- List rendering ---
 
 function renderSkillsList() {
@@ -135,68 +172,137 @@ function renderSkillsList() {
         return;
     }
 
-    skillsState.list.forEach((skill) => {
-        const card = document.createElement('div');
-        card.className = 'sk-card';
-        if (skill.id === skillsState.selectedId) card.classList.add('selected');
+    const groups = groupByFolder(skillsState.list);
+    const multipleGroups = groups.size > 1 || (groups.size === 1 && !groups.has(''));
 
-        const info = document.createElement('div');
-        info.className = 'sk-card-info';
-        info.addEventListener('click', () => selectSkill(skill.id));
-
-        const title = document.createElement('div');
-        title.className = 'sk-card-title';
-        title.textContent = skill.title || skill.id;
-
-        const desc = document.createElement('div');
-        desc.className = 'sk-card-desc';
-        desc.textContent = skill.description || skill.id;
-
-        info.appendChild(title);
-        info.appendChild(desc);
-
-        const meta = document.createElement('div');
-        meta.className = 'sk-card-meta';
-
-        const source = document.createElement('span');
-        source.className = 'sk-badge sk-badge-source';
-        source.textContent = sourceLabel(skill.sourceKind);
-        meta.appendChild(source);
-
-        if (Number.isFinite(Number(skill.resourceCount)) && Number(skill.resourceCount) > 0) {
-            const resources = document.createElement('span');
-            resources.className = 'sk-badge';
-            resources.textContent = Number(skill.resourceCount) + ' resources';
-            meta.appendChild(resources);
+    for (const [folder, skills] of groups) {
+        // Only show folder headers when there's a real folder structure
+        if (multipleGroups) {
+            const folderEl = renderFolderHeader(folder, skills);
+            els.listContainer.appendChild(folderEl);
         }
-        if (skill.editable === false) {
-            const readOnly = document.createElement('span');
-            readOnly.className = 'sk-badge';
-            readOnly.textContent = 'Read only';
-            meta.appendChild(readOnly);
+
+        const isCollapsed = skillsState.collapsedFolders.has(folder);
+
+        if (!isCollapsed) {
+            for (const skill of skills) {
+                const card = renderSkillCard(skill, multipleGroups);
+                els.listContainer.appendChild(card);
+            }
         }
-        info.appendChild(meta);
+    }
+}
 
-        const toggle = document.createElement('div');
-        toggle.className = 'toggle' + (skill.enabled ? ' on' : '');
-        toggle.title = skill.enabled ? 'Enabled. Click to disable.' : 'Disabled. Click to enable.';
-        toggle.setAttribute('role', 'switch');
-        toggle.setAttribute('tabindex', '0');
-        toggle.setAttribute('aria-checked', skill.enabled ? 'true' : 'false');
-        toggle.addEventListener('click', (e) => {
-            e.stopPropagation();
-            toggleSkillEnabled(skill.id, !skill.enabled, toggle);
-        });
-        toggle.addEventListener('keydown', (event) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            toggleSkillEnabled(skill.id, !skill.enabled, toggle);
-        });
+function renderFolderHeader(folder, skills) {
+    const header = document.createElement('div');
+    header.className = 'sk-folder-header';
 
-        card.appendChild(info);
-        card.appendChild(toggle);
-        els.listContainer.appendChild(card);
+    const isCollapsed = skillsState.collapsedFolders.has(folder);
+    if (isCollapsed) header.classList.add('collapsed');
+
+    const chevron = document.createElement('span');
+    chevron.className = 'sk-folder-chevron';
+    chevron.textContent = isCollapsed ? '\u25B6' : '\u25BC';
+
+    const icon = document.createElement('span');
+    icon.className = 'sk-folder-icon';
+    icon.textContent = isCollapsed ? '\uD83D\uDCC1' : '\uD83D\uDCC2';
+
+    const name = document.createElement('span');
+    name.className = 'sk-folder-name';
+    name.textContent = folder || 'Root';
+
+    const count = document.createElement('span');
+    count.className = 'sk-folder-count';
+    count.textContent = skills.length;
+
+    header.appendChild(chevron);
+    header.appendChild(icon);
+    header.appendChild(name);
+    header.appendChild(count);
+
+    header.addEventListener('click', () => {
+        if (skillsState.collapsedFolders.has(folder)) {
+            skillsState.collapsedFolders.delete(folder);
+        } else {
+            skillsState.collapsedFolders.add(folder);
+        }
+        renderSkillsList();
     });
+
+    return header;
+}
+
+function renderSkillCard(skill, nested) {
+    const card = document.createElement('div');
+    card.className = 'sk-card';
+    if (nested) card.classList.add('sk-card-nested');
+    if (skill.id === skillsState.selectedId) card.classList.add('selected');
+
+    const info = document.createElement('div');
+    info.className = 'sk-card-info';
+    info.addEventListener('click', () => selectSkill(skill.id));
+
+    const title = document.createElement('div');
+    title.className = 'sk-card-title';
+    title.textContent = skill.title || skill.id;
+
+    const desc = document.createElement('div');
+    desc.className = 'sk-card-desc';
+    desc.textContent = skill.description || skill.id;
+
+    info.appendChild(title);
+    info.appendChild(desc);
+
+    // Show folder badge on card when no folder grouping visible (flat list)
+    if (!nested && skill.folder) {
+        const badge = document.createElement('span');
+        badge.className = 'sk-card-folder-badge';
+        badge.textContent = skill.folder;
+        info.appendChild(badge);
+    }
+
+    const meta = document.createElement('div');
+    meta.className = 'sk-card-meta';
+
+    const source = document.createElement('span');
+    source.className = 'sk-badge sk-badge-source';
+    source.textContent = sourceLabel(skill.sourceKind);
+    meta.appendChild(source);
+
+    if (Number.isFinite(Number(skill.resourceCount)) && Number(skill.resourceCount) > 0) {
+        const resources = document.createElement('span');
+        resources.className = 'sk-badge';
+        resources.textContent = Number(skill.resourceCount) + ' resources';
+        meta.appendChild(resources);
+    }
+    if (skill.editable === false) {
+        const readOnly = document.createElement('span');
+        readOnly.className = 'sk-badge';
+        readOnly.textContent = 'Read only';
+        meta.appendChild(readOnly);
+    }
+    info.appendChild(meta);
+
+    const toggle = document.createElement('div');
+    toggle.className = 'toggle' + (skill.enabled ? ' on' : '');
+    toggle.title = skill.enabled ? 'Enabled. Click to disable.' : 'Disabled. Click to enable.';
+    toggle.setAttribute('role', 'switch');
+    toggle.setAttribute('tabindex', '0');
+    toggle.setAttribute('aria-checked', skill.enabled ? 'true' : 'false');
+    toggle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleSkillEnabled(skill.id, !skill.enabled, toggle);
+    });
+    toggle.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        toggleSkillEnabled(skill.id, !skill.enabled, toggle);
+    });
+
+    card.appendChild(info);
+    card.appendChild(toggle);
+    return card;
 }
 
 // --- Skill selection ---
@@ -254,6 +360,10 @@ async function selectSkill(skillId) {
     els.idInput.readOnly = true;
     els.titleInput.value = skill.title || '';
     els.descInput.value = skill.description || '';
+    els.priorityInput.value = skill.priority ?? 100;
+    els.scopesInput.value = arrayToCsv(skill.scopes);
+    els.providersInput.value = arrayToCsv(skill.providers);
+    els.modelsInput.value = arrayToCsv(skill.models);
     els.contentInput.value = skill.content || '';
     els.titleInput.readOnly = !editable;
     els.descInput.readOnly = !editable;
@@ -270,6 +380,15 @@ async function selectSkill(skillId) {
     els.editorMeta.textContent = metadata.join(' · ');
     els.deleteBtn.style.display = editable ? '' : 'none';
     els.saveBtn.style.display = editable ? '' : 'none';
+
+    if (els.sourcePath) {
+        if (skill.sourcePath) {
+            els.sourcePath.textContent = skill.sourcePath;
+            els.sourcePath.style.display = '';
+        } else {
+            els.sourcePath.style.display = 'none';
+        }
+    }
 }
 
 function startNewSkill() {
@@ -287,6 +406,10 @@ function startNewSkill() {
     els.idInput.readOnly = false;
     els.titleInput.value = '';
     els.descInput.value = '';
+    els.priorityInput.value = 100;
+    els.scopesInput.value = 'chat, completions';
+    els.providersInput.value = '';
+    els.modelsInput.value = '';
     els.contentInput.value = '';
     els.titleInput.readOnly = false;
     els.descInput.readOnly = false;
@@ -295,6 +418,7 @@ function startNewSkill() {
     els.editorMeta.textContent = 'Local · Editable';
     els.deleteBtn.style.display = 'none';
     els.saveBtn.style.display = '';
+    if (els.sourcePath) els.sourcePath.style.display = 'none';
     els.idInput.focus();
 }
 
@@ -335,11 +459,18 @@ async function saveSkillFromEditor() {
         setSkillsStatus('This skill is read only and cannot be changed.', 'error');
         return;
     }
+    const scopes = csvToArray(els.scopesInput.value);
+    const providers = csvToArray(els.providersInput.value);
+    const models = csvToArray(els.modelsInput.value);
     const payload = {
         id: (els.idInput.value || '').trim(),
         title: (els.titleInput.value || '').trim(),
         description: (els.descInput.value || '').trim(),
         content: els.contentInput.value || '',
+        priority: parseInt(els.priorityInput.value, 10) || 100,
+        scopes: scopes.length ? scopes : null,
+        providers: providers.length ? providers : null,
+        models: models.length ? models : null,
     };
     if (!payload.id || !payload.title || !payload.description || !payload.content.trim()) {
         setSkillsStatus('ID, title, description, and content are required.', 'warning');

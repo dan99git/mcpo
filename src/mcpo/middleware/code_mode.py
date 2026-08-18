@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 import mcp_types as mt
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import FunctionTool, Tool, ToolResult
+from starlette.types import Receive, Send
 
 from mcpo.services.code_mode import (
     CatalogEntry,
@@ -363,3 +364,73 @@ class CodeModeMCPMiddleware(Middleware):
             }
 
         return None
+
+
+# ---------------------------------------------------------------------------
+# ASGI helpers (free functions so they can be unit-tested without state)
+# ---------------------------------------------------------------------------
+
+async def _drain_body(receive: Receive) -> "tuple[bytes, List[Dict[str, Any]]]":
+    """Read the full request body; return it plus any trailing messages (e.g. http.disconnect)."""
+    parts: List[bytes] = []
+    tail: List[Dict[str, Any]] = []
+    more = True
+    while more:
+        msg = await receive()
+        if msg["type"] == "http.request":
+            parts.append(msg.get("body", b""))
+            more = msg.get("more_body", False)
+        else:
+            tail.append(msg)
+            more = False
+    return b"".join(parts), tail
+
+
+def _make_replay_receive(body: bytes, tail: List[Dict[str, Any]]) -> Receive:
+    """Build a receive callable that yields the given body once, then tail messages, then disconnect."""
+    state = {"sent_body": False, "tail": list(tail)}
+
+    async def _receive() -> Dict[str, Any]:
+        if not state["sent_body"]:
+            state["sent_body"] = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        if state["tail"]:
+            return state["tail"].pop(0)
+        return {"type": "http.disconnect"}
+
+    return _receive
+
+
+def _rewrite_execute_tool(parsed: Dict[str, Any], arguments: Dict[str, Any]) -> bytes:
+    """Rewrite an execute_tool request into a direct tools/call for the qualified tool.
+
+    'server.tool_name' → 'server__tool_name' (aggregate proxy naming convention).
+    """
+    qualified = arguments.get("tool", "")
+    if "." in qualified:
+        server, tool = qualified.split(".", 1)
+        aggregate_name = f"{server}__{tool}"
+    else:
+        aggregate_name = qualified
+
+    rewritten = dict(parsed)
+    rewritten["params"] = {
+        "name": aggregate_name,
+        "arguments": arguments.get("arguments", {}) or {},
+    }
+    return json.dumps(rewritten).encode()
+
+
+async def _send_jsonrpc_response(send: Send, request_id: Any, result: Dict[str, Any]) -> None:
+    """Send a synthesized JSON-RPC 2.0 response over ASGI."""
+    payload = {"jsonrpc": "2.0", "id": request_id, "result": result}
+    body = json.dumps(payload).encode()
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            (b"content-type", b"application/json"),
+            (b"content-length", str(len(body)).encode()),
+        ],
+    })
+    await send({"type": "http.response.body", "body": body})

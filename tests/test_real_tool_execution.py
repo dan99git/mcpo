@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import sys
 import textwrap
 import pytest
@@ -28,6 +29,11 @@ def get_current_time(timezone: Literal["UTC"]) -> dict[str, str]:
 if __name__ == "__main__":
     server.run()
 """
+
+requires_mcpo_json = pytest.mark.skipif(
+    not os.path.exists("mcpo.json"),
+    reason="mcpo.json not present in working dir; integration config required",
+)
 
 # Test that simulates how OpenWebUI/models would call MCPO tool endpoints
 
@@ -149,9 +155,10 @@ class TestRealToolExecution:
         assert "timezone" in result["result"]
         assert result["result"]["timezone"] == "UTC"
 
+    @requires_mcpo_json
     def test_time_server_error_handling(self):
         """Test error handling for invalid timezone."""
-        
+
         from mcpo.main import build_main_app
         app = asyncio.run(build_main_app(config_path="mcpo.json"))
         client = TestClient(app)
@@ -204,12 +211,13 @@ class TestRealToolExecution:
         error_data = tool_response.json()
         assert any(item.get("msg") == "Field required" for item in error_data.get("detail", [])), error_data
 
+    @requires_mcpo_json
     @pytest.mark.asyncio
     async def test_tool_timeout_behavior(self):
         """Test tool timeout behavior (if implemented)."""
-        
+
         from mcpo.main import build_main_app
-        
+
         app = await build_main_app(config_path="mcpo.json")
         with TestClient(app) as client:
             # Check server availability
@@ -241,9 +249,10 @@ class TestRealToolExecution:
             result_str = str(result.get("result", ""))
             assert any(keyword in result_str.lower() for keyword in ["utc", "time", "gmt", ":"]), f"Expected time info but got: {result_str}"
 
+    @requires_mcpo_json
     def test_openapi_docs_generation(self):
         """Test that OpenAPI docs are generated correctly for dynamic endpoints."""
-        
+
         from mcpo.main import build_main_app
         app = asyncio.run(build_main_app(config_path="mcpo.json"))
         client = TestClient(app)

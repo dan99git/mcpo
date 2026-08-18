@@ -44,10 +44,11 @@ class SkillDefinition:
     format: str = "legacy"
     editable: bool = True
     resource_count: int = 0
+    folder: str = ""
 
 
 def _skills_dir() -> Path:
-    configured = (os.getenv("MCPO_SKILLS_DIR") or "skills").strip()
+    configured = (os.getenv("MCPO_SKILLS_DIR") or "data/skills").strip()
     return Path(configured).resolve()
 
 
@@ -168,6 +169,11 @@ def _source_details(
         return "local", "local", "canonical", True
     if len(parts) > 1 and parts[0] == "installed":
         return "installed", parts[1], "canonical", False
+    if len(parts) == 2:
+        # Direct <folder>/SKILL.md at the configured root: user-authored
+        # skill in the real on-disk structure. Editable and enabled by
+        # default, unlike deeper (packaged) layouts.
+        return "local", "local", "canonical", True
     package_id = parts[0] if parts else path.parent.name
     return "bundled", package_id, "canonical", False
 
@@ -200,7 +206,9 @@ def _build_skill_from_file(
         body = validated["content"]
     else:
         meta, body = _parse_frontmatter(raw)
-        sid = _safe_skill_id(str(meta.get("id") or fallback_id))
+        # Support both "id" and "name" frontmatter keys before falling back
+        # to the file stem (flat .md files in the real skill structure).
+        sid = _safe_skill_id(str(meta.get("id") or meta.get("name") or fallback_id))
         title = str(meta.get("title") or meta.get("name") or sid)
         if len(title) > _MAX_SKILL_TITLE_CHARS:
             raise ValueError(f"Skill title exceeds {_MAX_SKILL_TITLE_CHARS} characters")
@@ -225,6 +233,13 @@ def _build_skill_from_file(
         for candidate in path.parent.rglob("*")
         if candidate.is_file() and candidate != path
     )
+    # Compute folder relative to skills root (drives folder-grouped UI list)
+    folder = ""
+    try:
+        rel = path.parent.relative_to(source_root)
+        folder = str(rel) if str(rel) != "." else ""
+    except ValueError:
+        folder = ""
     return SkillDefinition(
         id=sid,
         title=title,
@@ -242,6 +257,7 @@ def _build_skill_from_file(
         format=skill_format,
         editable=editable,
         resource_count=resource_count,
+        folder=folder,
     )
 
 
@@ -327,7 +343,18 @@ def get_skill(skill_id: str) -> Optional[SkillDefinition]:
     return None
 
 
-def upsert_skill_file(*, skill_id: str, title: str, description: str, content: str) -> SkillDefinition:
+def upsert_skill_file(
+    *,
+    skill_id: str,
+    title: str,
+    description: str,
+    content: str,
+    priority: int = 100,
+    scopes: Optional[List[str]] = None,
+    providers: Optional[List[str]] = None,
+    models: Optional[List[str]] = None,
+    tags: Optional[List[str]] = None,
+) -> SkillDefinition:
     sid = validate_skill_id(skill_id)
     title = (title or "").strip()
     description = (description or "").strip()
@@ -379,8 +406,17 @@ def upsert_skill_file(*, skill_id: str, title: str, description: str, content: s
     meta["title"] = title
     meta["description"] = description
     meta.setdefault("enabled", True)
-    meta.setdefault("priority", 100)
-    meta.setdefault("scopes", ["chat", "completions"])
+    meta["priority"] = priority
+    if scopes is not None:
+        meta["scopes"] = scopes
+    else:
+        meta.setdefault("scopes", ["chat", "completions"])
+    if providers is not None:
+        meta["providers"] = providers
+    if models is not None:
+        meta["models"] = models
+    if tags is not None:
+        meta["tags"] = tags
     frontmatter = yaml.safe_dump(
         meta,
         sort_keys=False,
@@ -432,9 +468,8 @@ def delete_skill_file(skill_id: str) -> bool:
     ):
         raise PermissionError("Skill path escaped the configured skills root")
     resolved_path.unlink()
-    local_root = (_skills_dir() / "local").resolve()
     parent = path.parent.resolve()
-    if parent != local_root and parent.is_relative_to(local_root):
+    if parent != root and parent.is_relative_to(root):
         try:
             parent.rmdir()
         except OSError:

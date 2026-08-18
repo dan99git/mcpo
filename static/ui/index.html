@@ -11,9 +11,9 @@
     <link rel="stylesheet" href="/ui/css/layout.css?v=20260730">
     <link rel="stylesheet" href="/ui/css/components.css?v=20250930222949">
     <link rel="stylesheet" href="/ui/css/logs.css?v=20250930222949">
-    <link rel="stylesheet" href="/ui/css/config.css?v=20260721">
-    <link rel="stylesheet" href="/ui/css/chat.css?v=202607211730">
-    <link rel="stylesheet" href="/ui/css/settings.css?v=20260722">
+    <link rel="stylesheet" href="/ui/css/config.css?v=20260818">
+    <link rel="stylesheet" href="/ui/css/chat.css?v=20260818">
+    <link rel="stylesheet" href="/ui/css/settings.css?v=20260818">
 </head>
 <body data-theme="light">
     <div class="app">
@@ -246,6 +246,27 @@
                                     <label class="sk-label" for="skills-description-input">Description</label>
                                     <textarea id="skills-description-input" class="sk-input sk-textarea-sm" placeholder="Brief description of what this skill does"></textarea>
                                 </div>
+                                <div class="sk-field-row">
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-priority-input">Priority</label>
+                                        <input id="skills-priority-input" class="sk-input" type="number" value="100" min="0" max="999" />
+                                    </div>
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-scopes-input">Scopes <span class="sk-label-hint">(comma-separated)</span></label>
+                                        <input id="skills-scopes-input" class="sk-input" placeholder="chat, completions" />
+                                    </div>
+                                </div>
+                                <div class="sk-field-row">
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-providers-input">Providers <span class="sk-label-hint">(optional filter)</span></label>
+                                        <input id="skills-providers-input" class="sk-input" placeholder="e.g. anthropic, openai" />
+                                    </div>
+                                    <div class="sk-field-group sk-field-half">
+                                        <label class="sk-label" for="skills-models-input">Models <span class="sk-label-hint">(optional filter)</span></label>
+                                        <input id="skills-models-input" class="sk-input" placeholder="e.g. claude-*, gpt-4o" />
+                                    </div>
+                                </div>
+                                <div class="sk-source-path" id="skills-source-path"></div>
                                 <div class="sk-field-group sk-field-grow">
                                     <label class="sk-label" for="skills-content-input">Content <span class="sk-label-hint">(Markdown)</span></label>
                                     <textarea id="skills-content-input" class="sk-input sk-textarea-lg" placeholder="Skill markdown content — this is injected into system prompts"></textarea>
@@ -792,12 +813,12 @@
     <script src="/ui/js/core/api.js?v=20260730"></script>
     <script src="/ui/js/core/rest-tools.js?v=20260721"></script>
     <script src="/ui/js/core/logs.js?v=20250930232705"></script>
-    <script src="/ui/js/components/navigation.js?v=20260730"></script>
+    <script src="/ui/js/components/navigation.js?v=20260818"></script>
     <script src="/ui/js/components/servers.js?v=20250930222949"></script>
     <script src="/ui/js/pages/config.js?v=20250930222949"></script>
-    <script src="/ui/js/pages/skills.js?v=20260721"></script>
-    <script src="/ui/js/pages/chat.js?v=202607211730"></script>
-    <script src="/ui/js/pages/settings.js?v=20260730"></script>
+    <script src="/ui/js/pages/skills.js?v=20260818"></script>
+    <script src="/ui/js/pages/chat.js?v=20260818"></script>
+    <script src="/ui/js/pages/settings.js?v=20260818"></script>
     <script src="/ui/js/core/globals.js?v=20250930222949"></script>
     <script src="/ui/js/core/app.js?v=20250930222949"></script>
 

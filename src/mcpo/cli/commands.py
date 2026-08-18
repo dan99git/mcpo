@@ -152,14 +152,22 @@ class ServerRunner:
         return True
     
     @staticmethod
-    def setup_environment(env_path: Optional[str]) -> None:
-        """Set up environment variables."""
+    def setup_environment(env_path: Optional[str], env: Optional[List[str]] = None) -> None:
+        """Set up environment variables from an env file and/or inline KEY=VALUE pairs."""
         if env_path:
             if os.path.exists(env_path):
                 load_dotenv(env_path)
                 typer.echo(f"Loaded environment from: {env_path}")
             else:
                 typer.echo(f"Warning: Environment file not found: {env_path}")
+
+        if env:
+            for var in env:
+                if "=" not in var:
+                    typer.echo(f"Skipping malformed --env entry (missing '='): {var}")
+                    continue
+                key, value = var.split("=", 1)
+                os.environ[key] = value
     
     @staticmethod
     def normalize_path_prefix(path_prefix: Optional[str]) -> str:

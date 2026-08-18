@@ -56,3 +56,5 @@ tools/mcp-node-tools/
 
 # Managed skill package installs
 skills/installed/
+
+temp_openapi.json

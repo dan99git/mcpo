@@ -45,7 +45,7 @@ Issues = "https://github.com/open-webui/mcpo/issues"
 Changelog = "https://github.com/open-webui/mcpo/blob/main/CHANGELOG.md"
 
 [project.scripts]
-mcpo = "mcpo:app"
+mcpo = "mcpo.cli:cli"
 mcpp-proxy = "mcpo.proxy:main"
 mcpp = "mcpo.proxy:main"
 

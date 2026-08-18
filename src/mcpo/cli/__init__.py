@@ -45,16 +45,19 @@ def serve_command(
     
     # Environment
     env_path: Annotated[Optional[str], typer.Option("--env-path", help="Environment variables file")] = None,
-    
+    env: Annotated[Optional[List[str]], typer.Option("--env", "-e", help="Environment variable KEY=VALUE (repeatable)")] = None,
+
     # Server metadata
     name: Annotated[Optional[str], typer.Option("--name", "-n", help="Server name")] = None,
     description: Annotated[Optional[str], typer.Option("--description", "-d", help="Server description")] = None,
     version: Annotated[Optional[str], typer.Option("--version", "-V", help="Server version")] = None,
-    
+
     # Advanced options
     path_prefix: Annotated[Optional[str], typer.Option("--path-prefix", help="URL path prefix")] = None,
     server_type: Annotated[str, typer.Option("--server-type", help="MCP server type")] = "stdio",
-    
+    headers: Annotated[Optional[str], typer.Option("--header", "-H", help="Headers in JSON format forwarded to MCP server")] = None,
+    mcp_proxy_url: Annotated[Optional[str], typer.Option("--mcp-proxy-url", help="MCP proxy base URL for log aggregation")] = None,
+
     # Logging
     log_level: Annotated[str, typer.Option("--log-level", "-l", help="Log level (debug, info, warning, error)")] = "info",
 ):
@@ -67,16 +70,16 @@ def serve_command(
     if not ServerRunner.validate_server_config(config_path, server_command):
         raise typer.Exit(1)
     
-    # Set up environment
-    ServerRunner.setup_environment(env_path)
+    # Set up environment (file + inline KEY=VALUE pairs)
+    ServerRunner.setup_environment(env_path, env)
     api_key = api_key or os.getenv("MCPO_API_KEY")
-    
+
     # Normalize path prefix
     path_prefix = ServerRunner.normalize_path_prefix(path_prefix)
-    
+
     # Display startup info
     ServerRunner.display_startup_info(config_path, server_command, host, port)
-    
+
     # Start the server
     asyncio.run(
         ServerRunner.start_server(
@@ -94,6 +97,8 @@ def serve_command(
             ssl_certfile=ssl_certfile,
             ssl_keyfile=ssl_keyfile,
             path_prefix=path_prefix,
+            headers=headers,
+            mcp_proxy_url=mcp_proxy_url,
             hot_reload=hot_reload,
             log_level=log_level,
         )

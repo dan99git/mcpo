@@ -5,6 +5,55 @@ Every change set that touches `src/`, `static/`, `tests/`, or dependencies MUST
 add an entry under an `## Unreleased` heading in the same commit — enforced by
 `.githooks/pre-commit` (enable with `git config core.hooksPath .githooks`).
 
+## Unreleased (dev) — 2026-08-18 (merge origin/dev: router/CLI migration x bench hardening)
+
+### Changed
+- Resolved the 13-file conflicted merge of origin/dev (typer CLI canonical entry
+  point, /_meta + tools/health router migration, Kimi/GLM providers, skills
+  folder UI) into local dev (rotating file logs, watchdog grace, codex key
+  gateway hardening, MCP 2026-07-28 adoption, UI log buffer fix). Both intents
+  preserved: theirs' router/CLI structure carries ours' hardened behavior.
+- `src/mcpo/main.py`: dropped the inline `/_meta` endpoints and inline
+  `create_dynamic_endpoints` (theirs' migration); kept ConfigTransactionMiddleware;
+  health snapshot state now lives only in `routers/health.py`.
+- `src/mcpo/api/routers/meta.py`: ported the bench-hardened inline endpoint
+  bodies (enable/disable/reinit rollback transactions, config save/add/remove
+  with atomic write + `_reload_config_with_rollback`, rest-tools trio,
+  aggregate_openapi with `$ref` rewriting, proxy log fetch auth header) onto the
+  mounted router; helpers late-bound via `main_module.<name>` so tests patching
+  `mcpo.main.*` still take effect; `list_servers` seeds from config (disabled
+  servers stay visible) then overlays mounts and proxy-only servers.
+- `src/mcpo/api/routers/tools.py`: MCP 2026-07-28 snake_case `server_info` +
+  aggregate OpenAPI cache invalidation ported from the inline version.
+- `src/mcpo/services/skills.py` + `routers/admin.py`: skill package model
+  (source_kind/package_id/editable/resource_count, canonical validation, atomic
+  writes, path guards) keeps ours' shape; theirs' `folder` field, id-from-`name`
+  fallback, and editable direct `<dir>/SKILL.md` skills (depth-1 at the skills
+  root) layered in; upsert accepts priority/scopes/providers/models/tags.
+- `src/mcpo/middleware/code_mode.py`: resolved as the native FastMCP middleware
+  (ours). Theirs' ASGI interception targets an interface the merged tree no
+  longer registers (FastMCPProxy.add_middleware dispatches hooks via
+  `Middleware.__call__`, which an ASGI `__call__` would break); the hook
+  implementation is a validated superset of the same feature.
+  `tests/test_code_mode_middleware.py` (theirs, ASGI-driven) ported to the hook
+  API; original archived in `.archive/2026-08-18/tests/`.
+- `src/mcpo/cli/__init__.py` / `commands.py`: theirs' `--env`/`--header`/
+  `--mcp-proxy-url` flags + ours' `MCPO_API_KEY` fallback and emoji-free output.
+- `static/ui/`: skills page keeps ours' package installer + read-only gating
+  with theirs' folder grouping, sourcePath display, and csv scope/provider/model
+  fields; css unioned; cache-bust stamps bumped to 20260818.
+- `routers/completions.py`: theirs' Kimi/GLM dual-mode providers taken as-is
+  (pure addition).
+
+### Verified
+- Full suite `uv run --no-sync pytest tests -q` with `MCPO_API_KEY` unset:
+  787 passed / 0 failed / 4 skipped. (With `MCPO_API_KEY` exported, 13
+  completions tests 401 by design of the auth posture — environmental, fails
+  identically on the pre-merge local dev tree.)
+- origin/dev baseline in its own venv: 278 passed, 2 errors,
+  `tests/test_protocol_version_header.py` uncollectable — theirs was not fully
+  green pre-merge.
+
 ## Unreleased (dev) — 2026-08-10 (UI log buffer loses uvicorn lines)
 
 ### Fixed
