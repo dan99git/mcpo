@@ -467,6 +467,12 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 
 ---
 
+## Maintainer workflow
+
+Contributor/agent rules live in [AGENTS.md](./AGENTS.md): daily diary logging under gitignored `jobs/`, archive-never-delete, PR-only workflow (no direct pushes; the maintainer reviews and merges).
+
+---
+
 ## 📄 License
 
 MIT License - see [LICENSE](./LICENSE)

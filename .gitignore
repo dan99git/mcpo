@@ -58,3 +58,7 @@ tools/mcp-node-tools/
 skills/installed/
 
 temp_openapi.json
+
+# Local work log + archive (never pushed)
+/jobs/
+.archive/
