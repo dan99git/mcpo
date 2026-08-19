@@ -72,6 +72,9 @@ def main(
     mcp_proxy_url: Annotated[
         Optional[str], typer.Option("--mcp-proxy-url", help="MCP proxy base URL for log aggregation")
     ] = None,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Set log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
+    ] = None,
 ):
     server_command = None
     if not config_path:
@@ -133,6 +136,10 @@ def main(
     if not path_prefix.startswith("/"):
         path_prefix = f"/{path_prefix}"
 
+    # Set LOG_LEVEL environment variable if provided
+    if log_level:
+        os.environ["LOG_LEVEL"] = log_level
+
     # Run your async run function from mcpo.main
     asyncio.run(
         run(
@@ -152,6 +159,7 @@ def main(
             path_prefix=path_prefix,
             headers=headers,
             hot_reload=hot_reload,
+            log_level=log_level,
             mcp_proxy_url=mcp_proxy_url,
         )
     )

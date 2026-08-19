@@ -1928,10 +1928,18 @@ async def build_main_app(
     path_prefix = kwargs.get("path_prefix") or "/"
     log_level = kwargs.get("log_level", "info").upper()
 
-    # Configure basic logging
+    # Configure logging based on LOG_LEVEL environment variable
+    log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+    try:
+        numeric_level = getattr(logging, log_level, None)
+        if not isinstance(numeric_level, int):
+            raise ValueError(f"Invalid log level: {log_level}")
+    except (ValueError, AttributeError):
+        logger.warning(f"Invalid LOG_LEVEL '{log_level}', defaulting to INFO")
+        numeric_level = logging.INFO
+
     logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        format="%(asctime)s - %(levelname)s - %(message)s"
+        level=numeric_level, format="%(asctime)s - %(levelname)s - %(message)s"
     )
 
     # Add log buffer handler for UI
@@ -2324,14 +2332,14 @@ async def run(
         main_app.state.config_watcher = config_watcher
 
     logger.info("Uvicorn server starting...")
-    log_level = kwargs.get("log_level", "info").lower()
+    uvicorn_log_level = logging.getLevelName(numeric_level).lower()
     config = uvicorn.Config(
         app=main_app,
         host=host,
         port=port,
         ssl_certfile=ssl_certfile,
         ssl_keyfile=ssl_keyfile,
-        log_level=log_level,
+        log_level=uvicorn_log_level,
     )
     # uvicorn.Config just applied its dictConfig, which strips handlers from the
     # non-propagating uvicorn loggers; re-attach the file handler so access and
